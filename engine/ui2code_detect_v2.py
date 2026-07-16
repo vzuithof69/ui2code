@@ -317,20 +317,38 @@ class UI2CodeDetect:
         print(f"CONTOUR_INFO: Image size {width}x{height}, tile_size={tile_size}, overlap={tile_overlap}", flush=True)
         sys.stdout.flush()
         
-        # Convert QImage to numpy array (fast, single call)
-        ptr = image.bits()
-        ptr.setsize(image.byteCount())
+        # Convert QImage to numpy array - COMPATIBLE WITH PySide6 6.11+
+        # DO NOT use ptr.setsize() - it's deprecated
+        # Method: copy image data to bytes, then to numpy
         
-        # QImage.Format_RGB32 or Format_ARGB32
-        img_array = np.array(ptr).reshape((height, width, 4))
+        # Get image format info
+        fmt = image.format()
         
-        # Convert to BGR for OpenCV (drop alpha channel)
-        img_bgr = img_array[:, :, :3]  # RGB -> will convert to BGR for cv2
+        # For Format_RGB32 or Format_ARGB32_Premultiplied
+        if fmt in (QImage.Format_RGB32, QImage.Format_ARGB32, QImage.Format_ARGB32_Premultiplied):
+            # Get raw bytes
+            img_bytes = bytearray(image.bits().asarray(height * width * 4))
+            
+            # Reshape to (height, width, 4) - BGRA or RGBA depending on platform
+            img_array = np.frombuffer(img_bytes, dtype=np.uint8).reshape((height, width, 4))
+            
+            # Qt stores as BGRA on most platforms, convert to RGB
+            # img_array is now [B, G, R, A] or [R, G, B, A]
+            # OpenCV expects BGR, so we use the array directly if it's BGRA
+            img_bgr = img_array[:, :, :3]  # Drop alpha channel
+            
+        else:
+            # Convert to RGB32 first for other formats
+            image_rgb = image.convertToFormat(QImage.Format_RGB32)
+            img_bytes = bytearray(image_rgb.bits().asarray(height * width * 4))
+            img_array = np.frombuffer(img_bytes, dtype=np.uint8).reshape((height, width, 4))
+            img_bgr = img_array[:, :, :3]
         
         print(f"CONTOUR_INFO: QImage converted to numpy array {img_array.shape}", flush=True)
         sys.stdout.flush()
         
-        # Convert RGB to BGR for OpenCV
+        # Convert RGB to BGR for OpenCV (if needed - Qt uses BGRA on Windows)
+        # Check if we need to swap channels by looking at a known color
         img_bgr = cv2.cvtColor(img_array[:, :, :3], cv2.COLOR_RGB2BGR)
         
         # Convert to grayscale
@@ -628,11 +646,26 @@ class UI2CodeDetect:
         
         return elements
 
-    def _detect_color_planes(self, image: "QImage") -> List[UIElement]:
+    def _detect_color_planes(
+        self,
+        image: "QImage",
+        max_candidates: int = 200,
+        tile_size: int = 1024
+    ) -> List[UIElement]:
         """Detect UI elements based on color plane differences.
         
+        Vectorized implementation using OpenCV/numpy - NO Python pixel loops.
         Finds rectangular regions with distinct colors from their surroundings.
         """
+        import sys
+        import numpy as np
+        
+        try:
+            import cv2
+        except ImportError:
+            print("COLOR_WARNING: OpenCV not available, skipping color detection", flush=True)
+            return []
+        
         elements: List[UIElement] = []
         width = image.width()
         height = image.height()
@@ -640,74 +673,95 @@ class UI2CodeDetect:
         if width < 10 or height < 10:
             return elements
         
-        # Sample colors at regular intervals
-        sample_step = max(5, min(20, width // 50))
-        color_regions: Dict[str, List[Tuple[int, int, int, int]]] = {}
+        print(f"COLOR_INFO: Image size {width}x{height}", flush=True)
+        sys.stdout.flush()
         
-        for y in range(0, height - sample_step, sample_step):
-            for x in range(0, width - sample_step, sample_step):
-                # Get average color of sample region
-                r_sum, g_sum, b_sum = 0, 0, 0
-                count = 0
-                for dy in range(sample_step):
-                    for dx in range(sample_step):
-                        if x + dx < width and y + dy < height:
-                            pixel = image.pixel(x + dx, y + dy)
-                            color = QColor(pixel)
-                            r_sum += color.red()
-                            g_sum += color.green()
-                            b_sum += color.blue()
-                            count += 1
-                
-                if count > 0:
-                    avg_r = r_sum // count
-                    avg_g = g_sum // count
-                    avg_b = b_sum // count
-                    color_key = f"{avg_r:02x}{avg_g:02x}{avg_b:02x}"
-                    
-                    if color_key not in color_regions:
-                        color_regions[color_key] = []
-                    color_regions[color_key].append((x, y, sample_step, sample_step))
+        start_time = time.time()
         
-        # Merge adjacent regions with same color
-        for color_key, regions in color_regions.items():
-            if len(regions) < 2:
+        # Convert QImage to numpy (same as contour detection)
+        fmt = image.format()
+        if fmt in (QImage.Format_RGB32, QImage.Format_ARGB32, QImage.Format_ARGB32_Premultiplied):
+            img_bytes = bytearray(image.bits().asarray(height * width * 4))
+            img_array = np.frombuffer(img_bytes, dtype=np.uint8).reshape((height, width, 4))
+            img_bgr = img_array[:, :, :3]
+        else:
+            image_rgb = image.convertToFormat(QImage.Format_RGB32)
+            img_bytes = bytearray(image_rgb.bits().asarray(height * width * 4))
+            img_array = np.frombuffer(img_bytes, dtype=np.uint8).reshape((height, width, 4))
+            img_bgr = img_array[:, :, :3]
+        
+        # Convert to grayscale for edge detection
+        gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        
+        # Use OpenCV to find color boundaries
+        # Apply Gaussian blur to reduce noise
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        
+        # Use Canny edge detection
+        edges = cv2.Canny(blurred, 30, 100)
+        
+        # Dilate edges to connect nearby regions
+        kernel = np.ones((3, 3), np.uint8)
+        dilated_edges = cv2.dilate(edges, kernel, iterations=2)
+        eroded_edges = cv2.erode(dilated_edges, kernel, iterations=1)
+        
+        # Find contours of color regions
+        contours, _ = cv2.findContours(eroded_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        print(f"COLOR_INFO: Found {len(contours)} raw contours", flush=True)
+        sys.stdout.flush()
+        
+        # Process contours into rectangular regions
+        for idx, contour in enumerate(contours):
+            if len(elements) >= max_candidates:
+                print(f"COLOR_INFO: Hit max_candidates limit ({max_candidates})", flush=True)
+                break
+            
+            # Get bounding rectangle
+            x, y, w, h = cv2.boundingRect(contour)
+            
+            # Filter small regions
+            if w < 20 or h < 20:
                 continue
             
-            # Simple merging: find bounding box of connected regions
-            merged = self._merge_adjacent_regions(regions, sample_step)
+            # Filter very large regions (likely background)
+            if w > width * 0.9 and h > height * 0.9:
+                continue
             
-            for x, y, w, h in merged:
-                if w < self.config['min_width'] or h < self.config['min_height']:
-                    continue
-                
-                area = w * h
-                image_area = width * height
-                if area / image_area > self.config['max_coverage_ratio']:
-                    continue  # Skip background-sized regions
-                
-                # Get actual color
-                color_rgb = self._get_region_color(image, x, y, w, h)
-                color_hex = UIElement._rgb_to_hex(color_rgb)
-                
-                # Calculate confidence
-                confidence = 0.5 + 0.3 * min(1.0, len(regions) / 10)
-                
-                element = UIElement(
-                    id=self._generate_element_id("color"),
-                    name=f"ColorPlane_{len(elements):04d}",
-                    element_type="unknown",
-                    category="general",
-                    color_rgb=color_rgb,
-                    color_hex=f"#{color_key.upper()}",
-                    x=x,
-                    y=y,
-                    width=w,
-                    height=h,
-                    confidence=min(0.95, confidence),
-                    source="color_plane"
-                )
-                elements.append(element)
+            # Get average color from the region
+            region = img_bgr[y:y+h, x:x+w]
+            if region.size > 0:
+                avg_color = np.mean(region, axis=(0, 1))
+                color_rgb = (int(avg_color[2]), int(avg_color[1]), int(avg_color[0]))  # BGR -> RGB
+            else:
+                color_rgb = (0, 0, 0)
+            
+            color_hex = UIElement._rgb_to_hex(color_rgb)
+            
+            # Calculate confidence based on region size and color uniformity
+            region_std = np.std(region)
+            uniformity = 1.0 / (1.0 + region_std / 50)  # Higher std = lower uniformity
+            confidence = min(0.95, 0.5 + uniformity * 0.3 + min(w * h / 10000, 0.2))
+            
+            element = UIElement(
+                id=self._generate_element_id("color"),
+                name=f"ColorPlane_{len(elements):04d}",
+                element_type="unknown",
+                category="general",
+                color_rgb=color_rgb,
+                color_hex=color_hex,
+                x=x,
+                y=y,
+                width=w,
+                height=h,
+                confidence=confidence,
+                source="color_plane"
+            )
+            elements.append(element)
+        
+        elapsed = time.time() - start_time
+        print(f"COLOR_INFO: Processed in {elapsed:.3f}s, returning {len(elements)} elements", flush=True)
+        sys.stdout.flush()
         
         return elements
 

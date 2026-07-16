@@ -1,4 +1,9 @@
 # UI2Code Dependencies
-# Generated for Phase 2 - PySide6 GUI
+# Fase 3B - Multi-Pass UI Detection with OpenCV
 
+# GUI Framework
 PySide6>=6.5.0
+
+# Image Processing (REQUIRED for Fase 3B)
+opencv-python>=4.8.0
+numpy>=1.24.0

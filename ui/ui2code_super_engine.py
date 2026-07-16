@@ -5,6 +5,7 @@ Main UI interface for the UI2Code conversion system.
 
 import sys
 import os
+from datetime import datetime
 from typing import Optional, Dict, Any, List
 
 # Import logging first
@@ -539,6 +540,7 @@ if _QT_AVAILABLE:
             self._detection_in_progress: bool = False
             self._watchdog_timer: Optional[Any] = None  # type: ignore
             self._watchdog_timeout: int = 60  # seconds
+            self._detection_cancelled: bool = False  # Track if detection was cancelled
             
             # Initialize logging
             global _logger
@@ -969,6 +971,11 @@ if _QT_AVAILABLE:
                 elements: List of detected UI elements.
             """
             global _logger
+            
+            # Check if detection was cancelled - ignore result if so
+            if self._detection_cancelled:
+                _logger.warning("Detection result received after cancellation - ignoring")
+                return
             
             try:
                 # Log resultaat

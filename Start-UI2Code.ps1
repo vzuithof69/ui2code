@@ -1,6 +1,6 @@
 # Start-UI2Code.ps1
 # UI2Code Super-Engine Startup Script for Windows
-# Simplified version - uses Python 3.12 directly
+# Fase 3B - Auto-installs dependencies and verifies imports
 
 param(
     [switch]$NoPause = $false
@@ -19,7 +19,7 @@ $PythonModule = "ui.ui2code_super_engine"
 # PYTHON LAUNCHER SETUP
 # ============================================================================
 # Use py.exe launcher with proper argument separation
-# Never store "py -3.12" as a single string - this breaks in PowerShell
+# ALWAYS use py -3.12, never plain "pip"
 try {
     $PyLauncher = (Get-Command py.exe -ErrorAction Stop).Source
     Write-Host "Found py.exe launcher: $PyLauncher" -ForegroundColor Green
@@ -54,8 +54,14 @@ function Install-Requirements {
     param([string]$Version = "-3.12", [string]$RequirementsFile)
     
     Write-Log "Installing dependencies from requirements.txt..."
-    & $PyLauncher $Version -m pip install -r $RequirementsFile --quiet
+    Write-Log "Command: $PyLauncher $Version -m pip install -r $RequirementsFile"
+    
+    # Install with verbose output logged
+    $installOutput = & $PyLauncher $Version -m pip install -r $RequirementsFile 2>&1
     $exitCode = $LASTEXITCODE
+    
+    # Log full pip output
+    $installOutput | ForEach-Object { Write-Log "pip: $_" }
     
     if ($exitCode -ne 0) {
         Write-Error-Log "pip install failed with exit code $exitCode"
@@ -74,6 +80,61 @@ function Start-UI2CodeModule {
     return $exitCode
 }
 
+function Test-RequiredImports {
+    param([string]$Version = "-3.12")
+    
+    Write-Log "Testing required imports..."
+    
+    $imports = @(
+        @{Name = "cv2"; Package = "opencv-python"},
+        @{Name = "numpy"; Package = "numpy"},
+        @{Name = "PySide6"; Package = "PySide6"}
+    )
+    
+    $allOk = $true
+    
+    foreach ($import in $imports) {
+        $testCode = "try: import $($import.Name); print('OK'); except ImportError as e: print(f'FAIL: {e}')"
+        $result = & $PyLauncher $Version -c $testCode 2>&1
+        
+        if ($result -match "OK") {
+            Write-Log "✓ $($import.Name) (from $($import.Package)) imported successfully" -Level "SUCCESS"
+        }
+        else {
+            Write-Log "✗ $($import.Name) (from $($import.Package)) import failed: $result" -Level "ERROR"
+            $allOk = $false
+        }
+    }
+    
+    return $allOk
+}
+
+function Get-PackageVersions {
+    param([string]$Version = "-3.12")
+    
+    Write-Log "Checking package versions..."
+    
+    # Python version
+    $pyVersion = & $PyLauncher $Version --version 2>&1
+    Write-Log "Python: $pyVersion"
+    
+    # pip version
+    $pipVersion = & $PyLauncher $Version -m pip --version 2>&1
+    Write-Log "pip: $pipVersion"
+    
+    # cv2 version
+    $cv2Version = & $PyLauncher $Version -c "import cv2; print(cv2.__version__)" 2>&1
+    Write-Log "cv2 (OpenCV): $cv2Version"
+    
+    # numpy version
+    $numpyVersion = & $PyLauncher $Version -c "import numpy; print(numpy.__version__)" 2>&1
+    Write-Log "numpy: $numpyVersion"
+    
+    # PySide6 version
+    $pysideVersion = & $PyLauncher $Version -c "import PySide6; print(PySide6.__version__)" 2>&1
+    Write-Log "PySide6: $pysideVersion"
+}
+
 # ============================================================================
 # LOGGING SETUP
 # ============================================================================
@@ -87,9 +148,7 @@ function Initialize-Logging {
         New-Item -ItemType Directory -Path $LogsDir -Force | Out-Null
     }
     
-    if (Test-Path $ErrorLogPath) {
-        Clear-Content -Path $ErrorLogPath -ErrorAction SilentlyContinue
-    }
+    # Don't clear error log - append instead
 }
 
 function Write-Log {
@@ -113,7 +172,7 @@ function Write-Log {
 function Write-Error-Log {
     param([string]$Message)
     Write-Log -Message $Message -Level "ERROR"
-    $errorEntry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $Message"
+    $errorEntry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') - $Message`n"
     Add-Content -Path $ErrorLogPath -Value $errorEntry -Encoding UTF8
 }
 
@@ -168,15 +227,16 @@ try {
     $pipVersionOutput = & $PyLauncher $pythonVersion -m pip --version 2>&1
     Write-Log "Found pip: $pipVersionOutput" -Level "SUCCESS"
     
-    # Install requirements if needed
-    Write-Log "Checking dependencies..."
-    $checkOutput = & $PyLauncher $pythonVersion -c "import PySide6; print('OK')" 2>&1
-    $checkExitCode = $LASTEXITCODE
+    # Test required imports
+    Write-Log "Testing required imports (cv2, numpy, PySide6)..."
+    $importsOk = Test-RequiredImports -Version $pythonVersion
     
-    if ($checkExitCode -eq 0 -and $checkOutput -match "OK") {
-        Write-Log "Dependencies already installed" -Level "SUCCESS"
+    if ($importsOk) {
+        Write-Log "All required imports available" -Level "SUCCESS"
+        Get-PackageVersions -Version $pythonVersion
     }
     else {
+        Write-Log "Some imports missing, installing dependencies..." -Level "WARNING"
         $installResult = Install-Requirements -Version $pythonVersion -RequirementsFile $RequirementsFile
         if (!$installResult) {
             Write-Host "`n=== FOUT: Installatie van dependencies mislukt ===" -ForegroundColor Red
@@ -185,7 +245,23 @@ try {
             if (!$NoPause) { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
             exit 1
         }
-        Write-Log "Dependencies installed" -Level "SUCCESS"
+        
+        # Re-test imports after installation
+        Write-Log "Re-testing imports after installation..."
+        $importsOk = Test-RequiredImports -Version $pythonVersion
+        
+        if ($importsOk) {
+            Write-Log "All imports now available" -Level "SUCCESS"
+            Get-PackageVersions -Version $pythonVersion
+        }
+        else {
+            Write-Error-Log "Import test failed after installation"
+            Write-Host "`n=== FOUT: Imports werken niet na installatie ===" -ForegroundColor Red
+            Write-Host "Zie log file: $LogPath" -ForegroundColor Yellow
+            Write-Host "`nDruk op een toets om af te sluiten..."
+            if (!$NoPause) { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
+            exit 1
+        }
     }
     
     # Start GUI

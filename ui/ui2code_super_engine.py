@@ -12,6 +12,7 @@ from engine.ui2code_core import UI2CodeCore
 from engine.ui2code_detect import UI2CodeDetect
 from engine.ui2code_layout import UI2CodeLayout
 from engine.ui2code_export import UI2CodeExport
+from engine.models import UIElement
 
 # Try to import Qt - will fail in environments without Qt libraries
 try:
@@ -35,8 +36,6 @@ except ImportError:
 
 
 if _QT_AVAILABLE:
-    from engine.models import UIElement
-
     class ElementEditor(QGroupBox):
         """Element editor panel for editing UI element properties."""
 
@@ -328,6 +327,11 @@ if _QT_AVAILABLE:
             """Initialize the main window."""
             super().__init__()
             self._current_image_path: Optional[str] = None
+            self._elements: List[UIElement] = []
+            
+            # Initialize detection engine
+            self.detector = UI2CodeDetect()
+            
             self._setup_ui()
             self._setup_connections()
 
@@ -521,9 +525,6 @@ if _QT_AVAILABLE:
 
             # Connect table selection to editor
             self.tab_elements.itemSelectionChanged.connect(self._on_element_selected)
-
-            # Store detected elements
-            self._elements: List[UIElement] = []
 
         def _on_choose_image(self) -> None:
             """Handle choose image button click."""

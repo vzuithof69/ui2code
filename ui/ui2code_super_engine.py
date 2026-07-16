@@ -16,6 +16,7 @@ _logger = None
 # Import engine classes first (no Qt dependency)
 from engine.ui2code_core import UI2CodeCore
 from engine.ui2code_detect import UI2CodeDetect
+from engine.ui2code_detect_v2 import UI2CodeDetect as UI2CodeDetectV2
 from engine.ui2code_layout import UI2CodeLayout
 from engine.ui2code_export import UI2CodeExport
 from engine.models import UIElement
@@ -39,6 +40,10 @@ except ImportError:
     QWidget = object  # type: ignore
     QGroupBox = object  # type: ignore
     QScrollArea = object  # type: ignore
+
+# Import overlay renderer (requires Qt)
+if _QT_AVAILABLE:
+    from ui.preview_overlay import OverlayRenderer
 
 
 if _QT_AVAILABLE:
@@ -384,7 +389,7 @@ if _QT_AVAILABLE:
 
 
     class PreviewArea(QScrollArea):
-        """Preview area for displaying UI images with zoom support."""
+        """Preview area for displaying UI images with zoom and overlay support."""
 
         def __init__(self, parent: Optional[QWidget] = None) -> None:
             """Initialize the preview area.
@@ -395,7 +400,10 @@ if _QT_AVAILABLE:
             super().__init__(parent)
             self._zoom_factor: float = 1.0
             self._pixmap: Optional[QPixmap] = None
+            self._overlay_elements: List[UIElement] = []
+            self._selected_element_id: Optional[str] = None
             self._setup_ui()
+            self._setup_overlay()
 
         def _setup_ui(self) -> None:
             """Set up the preview area UI."""
@@ -418,6 +426,10 @@ if _QT_AVAILABLE:
             """)
             self.setWidget(self.placeholder_label)
 
+        def _setup_overlay(self) -> None:
+            """Set up overlay renderer."""
+            self._renderer = OverlayRenderer()
+
         def set_image(self, filepath: str) -> bool:
             """Load and display an image from file.
 
@@ -436,6 +448,30 @@ if _QT_AVAILABLE:
 
             self._update_display()
             return True
+
+        def set_overlay_elements(
+            self,
+            elements: List[UIElement],
+            selected_id: Optional[str] = None
+        ) -> None:
+            """Set elements to display as overlay.
+
+            Args:
+                elements: List of UI elements to draw.
+                selected_id: ID of selected element to highlight.
+            """
+            self._overlay_elements = elements
+            self._selected_element_id = selected_id
+            self._update_display()
+
+        def highlight_element(self, element_id: Optional[str]) -> None:
+            """Highlight a specific element in the overlay.
+
+            Args:
+                element_id: ID of element to highlight, or None to clear.
+            """
+            self._selected_element_id = element_id
+            self._update_display()
 
         def set_zoom(self, zoom_factor: float) -> None:
             """Set zoom factor for the displayed image.
@@ -463,19 +499,20 @@ if _QT_AVAILABLE:
             self.set_zoom(self._zoom_factor / 1.25)
 
         def _update_display(self) -> None:
-            """Update the displayed image based on current zoom."""
+            """Update the displayed image with overlay."""
             if self._pixmap is None:
                 return
 
-            scaled_pixmap = self._pixmap.scaled(
-                int(self._pixmap.width() * self._zoom_factor),
-                int(self._pixmap.height() * self._zoom_factor),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
+            # Render with overlay
+            result_pixmap = self._renderer.render_overlay(
+                self._pixmap,
+                self._overlay_elements,
+                self._selected_element_id,
+                self._zoom_factor
             )
 
             image_label = QLabel()
-            image_label.setPixmap(scaled_pixmap)
+            image_label.setPixmap(result_pixmap)
             image_label.setAlignment(Qt.AlignCenter)
             image_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             self.setWidget(image_label)
@@ -484,6 +521,8 @@ if _QT_AVAILABLE:
             """Clear the preview area and show placeholder."""
             self._pixmap = None
             self._zoom_factor = 1.0
+            self._overlay_elements = []
+            self._selected_element_id = None
             self.setWidget(self.placeholder_label)
 
 
@@ -495,13 +534,14 @@ if _QT_AVAILABLE:
             super().__init__()
             self._current_image_path: Optional[str] = None
             self._elements: List[UIElement] = []
+            self._manual_corrections: Dict[str, Dict[str, Any]] = {}  # Store manual corrections by element ID
             
             # Initialize logging
             global _logger
             _logger = initialize_logging()
             
-            # Initialize detection engine
-            self.detector = UI2CodeDetect()
+            # Initialize detection engine (use V2 for multi-pass detection)
+            self.detector = UI2CodeDetectV2()
             
             self._setup_ui()
             self._setup_connections()
@@ -781,8 +821,12 @@ if _QT_AVAILABLE:
                 return
 
             try:
+                # Store manual corrections before re-detection
+                old_corrections = self._store_manual_corrections()
+                _logger.info(f"Handmatige correcties opgeslagen: {len(old_corrections)} element(en)")
+                
                 # Log detectie start
-                _logger.info(f"Start detectie - afbeeldingspad: {self._current_image_path}")
+                _logger.info(f"Start multi-pass detectie - afbeeldingspad: {self._current_image_path}")
                 
                 # Verify file exists
                 if not os.path.exists(self._current_image_path):
@@ -799,18 +843,39 @@ if _QT_AVAILABLE:
                 except Exception as img_err:
                     _logger.warning(f"Kon afbeeldingsinformatie niet lezen: {img_err}")
                 
-                # Run detection - pass image_path as image_data argument
-                _logger.info("Roep detect_elements() aan met image_data=image_path")
+                # Run multi-pass detection
+                _logger.info("Roep detect_elements() aan met Fase 3B multi-pass detectie")
                 elements = self.detector.detect_elements(image_data=self._current_image_path)
+                
+                # Preserve manual corrections
+                preserved_count = self._preserve_manual_corrections(elements, old_corrections)
+                _logger.info(f"Handmatige correcties behouden: {preserved_count} element(en)")
                 
                 # Log resultaat
                 _logger.info(f"Detectie voltooid - {len(elements)} element(en) gedetecteerd")
+                
+                # Log classification distribution
+                by_type: Dict[str, int] = {}
+                for elem in elements:
+                    by_type[elem.element_type] = by_type.get(elem.element_type, 0) + 1
+                _logger.info(f"Classificatieverdeling: {by_type}")
+                
+                # Log confidence statistics
+                if elements:
+                    confidences = [e.confidence for e in elements]
+                    _logger.info(
+                        f"Confidence statistieken: min={min(confidences):.3f}, "
+                        f"max={max(confidences):.3f}, avg={sum(confidences)/len(confidences):.3f}"
+                    )
                 
                 # Store elements
                 self._elements = elements
 
                 # Update table
                 self._update_elements_table(elements)
+
+                # Update overlay
+                self.preview_area.set_overlay_elements(elements)
 
                 # Clear editor
                 self.element_editor.clear()
@@ -851,6 +916,105 @@ if _QT_AVAILABLE:
                     "Detectiefout",
                     f"Er is een fout opgetreden bij het detecteren:\n{str(e)}"
                 )
+
+        def _store_manual_corrections(self) -> Dict[str, Dict[str, Any]]:
+            """Store current manual corrections.
+            
+            Returns:
+                Dictionary mapping element ID to corrected fields.
+            """
+            corrections = {}
+            for elem in self._elements:
+                if elem.manually_corrected:
+                    corrections[elem.id] = {
+                        'name': elem.name if 'name' in elem.manually_corrected else None,
+                        'element_type': elem.element_type if 'element_type' in elem.manually_corrected else None,
+                        'category': elem.category if 'category' in elem.manually_corrected else None,
+                        'fields': set(elem.manually_corrected)
+                    }
+            return corrections
+
+        def _preserve_manual_corrections(
+            self,
+            new_elements: List[UIElement],
+            old_corrections: Dict[str, Dict[str, Any]]
+        ) -> int:
+            """Preserve manual corrections after re-detection.
+            
+            Matches new elements to old corrections based on geometric overlap.
+            
+            Args:
+                new_elements: Newly detected elements.
+                old_corrections: Previously stored corrections.
+            
+            Returns:
+                Number of corrections preserved.
+            """
+            if not old_corrections:
+                return 0
+            
+            preserved = 0
+            
+            for new_elem in new_elements:
+                # Find best matching old element by IoU
+                best_match = None
+                best_iou = 0.3  # Minimum 30% overlap
+                
+                for old_id, correction in old_corrections.items():
+                    # Find old element in current elements by ID pattern or position
+                    # For simplicity, match by position overlap
+                    old_elem = next((e for e in self._elements if e.id == old_id), None)
+                    if old_elem is None:
+                        continue
+                    
+                    # Calculate overlap
+                    iou = self._calculate_overlap(new_elem, old_elem)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_match = (old_id, correction)
+                
+                if best_match:
+                    old_id, correction = best_match
+                    # Apply corrections
+                    if correction['name'] is not None:
+                        new_elem.name = correction['name']
+                    if correction['element_type'] is not None:
+                        new_elem.element_type = correction['element_type']
+                    if correction['category'] is not None:
+                        new_elem.category = correction['category']
+                    new_elem.manually_corrected = correction['fields'].copy()
+                    preserved += 1
+            
+            return preserved
+
+        def _calculate_overlap(self, elem1: UIElement, elem2: UIElement) -> float:
+            """Calculate overlap ratio between two elements.
+            
+            Args:
+                elem1: First element.
+                elem2: Second element.
+            
+            Returns:
+                Overlap ratio (0.0 to 1.0).
+            """
+            # Calculate intersection
+            x1 = max(elem1.x, elem2.x)
+            y1 = max(elem1.y, elem2.y)
+            x2 = min(elem1.x + elem1.width, elem2.x + elem2.width)
+            y2 = min(elem1.y + elem1.height, elem2.y + elem2.height)
+            
+            if x1 >= x2 or y1 >= y2:
+                return 0.0
+            
+            intersection = (x2 - x1) * (y2 - y1)
+            area1 = elem1.width * elem1.height
+            area2 = elem2.width * elem2.height
+            
+            if area1 == 0 or area2 == 0:
+                return 0.0
+            
+            # Use smaller area as reference
+            return intersection / min(area1, area2)
 
         def _update_elements_table(self, elements: List[UIElement]) -> None:
             """Update the elements table with detected elements.
@@ -925,6 +1089,7 @@ if _QT_AVAILABLE:
 
             if not selected_items:
                 self.element_editor.clear()
+                self.preview_area.highlight_element(None)
                 return
 
             # Get the first selected row
@@ -934,13 +1099,17 @@ if _QT_AVAILABLE:
             id_item = table.item(row, 0)
             if id_item is None:
                 self.element_editor.clear()
+                self.preview_area.highlight_element(None)
                 return
 
             element = id_item.data(Qt.UserRole)
             if isinstance(element, UIElement):
                 self.element_editor.set_element(element)
+                # Highlight element in overlay
+                self.preview_area.highlight_element(element.id)
             else:
                 self.element_editor.clear()
+                self.preview_area.highlight_element(None)
 
         def _on_element_changed(
             self,

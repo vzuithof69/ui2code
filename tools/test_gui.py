@@ -8,18 +8,31 @@ This test:
 - Creates the UI2CodeSuperEngineWindow
 - Verifies all widgets are present
 - Tests zoom functionality
+- Mocks file dialogs to prevent blocking
 - Properly closes the window
 - Cleans up resources
 """
 
 import sys
 import os
+import signal
+from unittest.mock import patch
 
 # Set headless platform before importing PySide6
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+
+class TestTimeoutError(Exception):
+    """Raised when a test exceeds the maximum allowed duration."""
+    pass
+
+
+def timeout_handler(signum, frame):
+    """Signal handler for test timeout."""
+    raise TestTimeoutError("Test exceeded maximum duration (30 seconds)")
 
 
 def test_gui_creation() -> bool:
@@ -31,6 +44,11 @@ def test_gui_creation() -> bool:
     print("Testing UI2Code GUI creation (headless mode)...")
     print("-" * 40)
 
+    # Set timeout for entire test (30 seconds max)
+    if hasattr(signal, 'SIGALRM'):
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(30)
+
     try:
         # First check if Qt is available
         try:
@@ -41,7 +59,7 @@ def test_gui_creation() -> bool:
             print("  Skipping GUI tests (system libraries missing)")
             print("-" * 40)
             print("GUI tests skipped - Qt system libraries not installed")
-            return True
+            return False
 
         from ui.ui2code_super_engine import UI2CodeSuperEngineWindow, ElementEditor, PreviewArea
 
@@ -156,10 +174,49 @@ def test_gui_creation() -> bool:
         assert window.isVisible(), "Window should be visible"
         print("  ✓ Window is visible")
 
-        # Test button clicks (placeholder actions)
-        print("\nTesting button clicks...")
-        window.btn_detect_ui.click()
-        print("  ✓ Button clicks work (placeholder actions)")
+        # Test button clicks with mocked dialogs
+        print("\nTesting button clicks (with mocked dialogs)...")
+        
+        # Mock QFileDialog and QMessageBox to prevent blocking
+        with patch("ui.ui2code_super_engine.QFileDialog.getOpenFileName", return_value=("", "")):
+            with patch("ui.ui2code_super_engine.QMessageBox.information"):
+                with patch("ui.ui2code_super_engine.QMessageBox.warning"):
+                    print("  Testing btn_choose_image...")
+                    window.btn_choose_image.click()
+                    app.processEvents()
+                    print("  ✓ btn_choose_image works (mocked)")
+
+                    print("  Testing btn_detect_ui...")
+                    window.btn_detect_ui.click()
+                    app.processEvents()
+                    print("  ✓ btn_detect_ui works (mocked)")
+
+                    print("  Testing btn_ocr_labels...")
+                    window.btn_ocr_labels.click()
+                    app.processEvents()
+                    print("  ✓ btn_ocr_labels works (mocked)")
+
+                    print("  Testing btn_auto_name...")
+                    window.btn_auto_name.click()
+                    app.processEvents()
+                    print("  ✓ btn_auto_name works (mocked)")
+
+                    print("  Testing btn_export...")
+                    window.btn_export.click()
+                    app.processEvents()
+                    print("  ✓ btn_export works (mocked)")
+
+                    print("  Testing btn_save_snapshot...")
+                    window.btn_save_snapshot.click()
+                    app.processEvents()
+                    print("  ✓ btn_save_snapshot works (mocked)")
+
+                    print("  Testing btn_load_state...")
+                    window.btn_load_state.click()
+                    app.processEvents()
+                    print("  ✓ btn_load_state works (mocked)")
+
+        print("  ✓ All button clicks work (dialogs mocked)")
 
         # Process events to ensure everything is rendered
         app.processEvents()
@@ -179,14 +236,25 @@ def test_gui_creation() -> bool:
         app.quit()
         print("  ✓ QApplication quit")
 
+        # Cancel timeout
+        if hasattr(signal, 'SIGALRM'):
+            signal.alarm(0)
+
         print("-" * 40)
         print("All GUI tests passed!")
         return True
 
+    except TestTimeoutError as e:
+        print(f"  ✗ Timeout error: {e}")
+        print("  Test took longer than 30 seconds - possible deadlock")
+        return False
     except Exception as e:
         print(f"  ✗ Error: {e}")
         import traceback
         traceback.print_exc()
+        # Cancel timeout
+        if hasattr(signal, 'SIGALRM'):
+            signal.alarm(0)
         return False
 
 

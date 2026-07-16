@@ -42,8 +42,13 @@ except ImportError:
 
 
 if _QT_AVAILABLE:
+    from PySide6.QtCore import Signal
+    
     class ElementEditor(QGroupBox):
         """Element editor panel for editing UI element properties."""
+        
+        # Signal emitted when element data changes: (element, field_name, old_value, new_value)
+        element_changed = Signal(object, str, object, object)
 
         def __init__(self, parent: Optional[QWidget] = None) -> None:
             """Initialize the element editor.
@@ -103,33 +108,189 @@ if _QT_AVAILABLE:
             self.w_edit.editingFinished.connect(self._on_field_changed)
             self.h_edit.editingFinished.connect(self._on_field_changed)
             self.color_hex_edit.editingFinished.connect(self._on_color_changed)
+            self.color_rgb_edit.editingFinished.connect(self._on_rgb_color_changed)
+
+        def _get_old_values(self) -> Dict[str, Any]:
+            """Get current values before change for logging.
+            
+            Returns:
+                Dictionary with current field values.
+            """
+            if self._current_element is None:
+                return {}
+            return {
+                'name': self._current_element.name,
+                'element_type': self._current_element.element_type,
+                'category': self._current_element.category,
+                'x': self._current_element.x,
+                'y': self._current_element.y,
+                'width': self._current_element.width,
+                'height': self._current_element.height,
+                'color_rgb': self._current_element.color_rgb,
+                'color_hex': self._current_element.color_hex,
+            }
 
         def _on_field_changed(self) -> None:
             """Handle field change and update current element."""
             if self._current_element is None:
                 return
 
+            old_values = self._get_old_values()
+            
             try:
+                # Store old values for logging
+                old_name = self._current_element.name
+                old_type = self._current_element.element_type
+                old_category = self._current_element.category
+                old_x = self._current_element.x
+                old_y = self._current_element.y
+                old_width = self._current_element.width
+                old_height = self._current_element.height
+                
+                # Update element
                 self._current_element.name = self.name_edit.text()
                 self._current_element.element_type = self.type_edit.text()
                 self._current_element.category = self.category_edit.text()
-                self._current_element.x = int(self.x_edit.text() or 0)
-                self._current_element.y = int(self.y_edit.text() or 0)
-                self._current_element.width = int(self.w_edit.text() or 0)
-                self._current_element.height = int(self.h_edit.text() or 0)
-            except (ValueError, AttributeError):
-                pass  # Ignore invalid input
+                
+                # Validate and update numeric fields
+                try:
+                    new_x = int(self.x_edit.text() or 0)
+                    self._current_element.x = new_x
+                except ValueError:
+                    # Restore old value on invalid input
+                    self.x_edit.setText(str(old_x))
+                    return
+                
+                try:
+                    new_y = int(self.y_edit.text() or 0)
+                    self._current_element.y = new_y
+                except ValueError:
+                    self.y_edit.setText(str(old_y))
+                    return
+                
+                try:
+                    new_width = int(self.w_edit.text() or 0)
+                    self._current_element.width = new_width
+                except ValueError:
+                    self.w_edit.setText(str(old_width))
+                    return
+                
+                try:
+                    new_height = int(self.h_edit.text() or 0)
+                    self._current_element.height = new_height
+                except ValueError:
+                    self.h_edit.setText(str(old_height))
+                    return
+                
+                # Emit signal for each changed field
+                if self._current_element.name != old_name:
+                    self.element_changed.emit(
+                        self._current_element, 'name', old_name, self._current_element.name
+                    )
+                if self._current_element.element_type != old_type:
+                    self.element_changed.emit(
+                        self._current_element, 'element_type', old_type, self._current_element.element_type
+                    )
+                if self._current_element.category != old_category:
+                    self.element_changed.emit(
+                        self._current_element, 'category', old_category, self._current_element.category
+                    )
+                if self._current_element.x != old_x:
+                    self.element_changed.emit(
+                        self._current_element, 'x', old_x, self._current_element.x
+                    )
+                if self._current_element.y != old_y:
+                    self.element_changed.emit(
+                        self._current_element, 'y', old_y, self._current_element.y
+                    )
+                if self._current_element.width != old_width:
+                    self.element_changed.emit(
+                        self._current_element, 'width', old_width, self._current_element.width
+                    )
+                if self._current_element.height != old_height:
+                    self.element_changed.emit(
+                        self._current_element, 'height', old_height, self._current_element.height
+                    )
+                    
+            except (ValueError, AttributeError) as e:
+                # Log warning but don't crash
+                if _logger is not None:
+                    _logger.warning(f"Invalid input in element editor: {e}")
+                pass
 
         def _on_color_changed(self) -> None:
             """Handle color hex change and update RGB."""
             if self._current_element is None:
                 return
 
+            old_hex = self._current_element.color_hex
+            old_rgb = self._current_element.color_rgb
+            
             hex_color = self.color_hex_edit.text()
-            rgb = UIElement._hex_to_rgb(hex_color)
-            self._current_element.color_hex = hex_color
-            self._current_element.color_rgb = rgb
-            self.color_rgb_edit.setText(f"{rgb[0]},{rgb[1]},{rgb[2]}")
+            try:
+                rgb = UIElement._hex_to_rgb(hex_color)
+                self._current_element.color_hex = hex_color
+                self._current_element.color_rgb = rgb
+                
+                # Update RGB field without triggering another change
+                self.color_rgb_edit.blockSignals(True)
+                self.color_rgb_edit.setText(f"{rgb[0]},{rgb[1]},{rgb[2]}")
+                self.color_rgb_edit.blockSignals(False)
+                
+                # Emit signals for color changes
+                self.element_changed.emit(
+                    self._current_element, 'color_hex', old_hex, hex_color
+                )
+                self.element_changed.emit(
+                    self._current_element, 'color_rgb', old_rgb, rgb
+                )
+            except ValueError as e:
+                # Invalid hex color - restore old value
+                self.color_hex_edit.setText(old_hex)
+                if _logger is not None:
+                    _logger.warning(f"Invalid hex color: {hex_color} - {e}")
+
+        def _on_rgb_color_changed(self) -> None:
+            """Handle color RGB change and update HEX."""
+            if self._current_element is None:
+                return
+
+            old_hex = self._current_element.color_hex
+            old_rgb = self._current_element.color_rgb
+            
+            rgb_text = self.color_rgb_edit.text()
+            try:
+                # Parse "R,G,B" format
+                parts = rgb_text.split(',')
+                if len(parts) != 3:
+                    raise ValueError("RGB must be in format R,G,B")
+                r, g, b = int(parts[0]), int(parts[1]), int(parts[2])
+                
+                # Validate range
+                if not (0 <= r <= 255 and 0 <= g <= 255 and 0 <= b <= 255):
+                    raise ValueError("RGB values must be 0-255")
+                
+                hex_color = UIElement._rgb_to_hex((r, g, b))
+                self._current_element.color_rgb = (r, g, b)
+                self._current_element.color_hex = hex_color
+                
+                # Update HEX field without triggering another change
+                self.color_hex_edit.blockSignals(True)
+                self.color_hex_edit.setText(hex_color)
+                self.color_hex_edit.blockSignals(False)
+                
+                # Emit signals for color changes
+                self.element_changed.emit(
+                    self._current_element, 'color_rgb', old_rgb, (r, g, b)
+                )
+                self.element_changed.emit(
+                    self._current_element, 'color_hex', old_hex, hex_color
+                )
+            except ValueError as e:
+                # Invalid RGB - restore old value
+                self.color_rgb_edit.setText(f"{old_rgb[0]},{old_rgb[1]},{old_rgb[2]}")
+                if _logger is not None:
+                    _logger.warning(f"Invalid RGB color: {rgb_text} - {e}")
 
         def get_element_data(self) -> Dict[str, Any]:
             """Get current element data from editor fields.
@@ -535,6 +696,9 @@ if _QT_AVAILABLE:
 
             # Connect table selection to editor
             self.tab_elements.itemSelectionChanged.connect(self._on_element_selected)
+            
+            # Connect editor changes to table update and logging
+            self.element_editor.element_changed.connect(self._on_element_changed)
 
         def _on_choose_image(self) -> None:
             """Handle choose image button click."""
@@ -777,6 +941,113 @@ if _QT_AVAILABLE:
                 self.element_editor.set_element(element)
             else:
                 self.element_editor.clear()
+
+        def _on_element_changed(
+            self,
+            element: UIElement,
+            field_name: str,
+            old_value: Any,
+            new_value: Any
+        ) -> None:
+            """Handle element change and update table.
+            
+            Args:
+                element: The UIElement that changed.
+                field_name: Name of the field that changed.
+                old_value: Previous value.
+                new_value: New value.
+            """
+            global _logger
+            if _logger is None:
+                _logger = get_logger()
+            
+            # Log the change
+            _logger.info(
+                f"Element {element.id} field {field_name} changed "
+                f"from {repr(old_value)} to {repr(new_value)}"
+            )
+            
+            # Find the row for this element and update the table cell
+            table = self.tab_elements
+            for row in range(table.rowCount()):
+                id_item = table.item(row, 0)
+                if id_item is not None:
+                    row_element = id_item.data(Qt.UserRole)
+                    if row_element is element:
+                        # Update the appropriate cell based on field name
+                        self._update_table_cell(row, field_name, new_value)
+                        break
+
+        def _update_table_cell(self, row: int, field_name: str, value: Any) -> None:
+            """Update a single table cell.
+            
+            Args:
+                row: Row index to update.
+                field_name: Name of the field to update.
+                value: New value for the cell.
+            """
+            table = self.tab_elements
+            
+            # Map field names to column indices
+            field_to_column = {
+                'name': 1,
+                'element_type': 2,
+                'category': 3,
+                'x': 4,
+                'y': 5,
+                'width': 6,
+                'height': 7,
+                'color_hex': 8,
+                'color_rgb': 8,  # Color column shows HEX
+            }
+            
+            column = field_to_column.get(field_name)
+            if column is None:
+                return
+            
+            # Get existing item or create new one
+            item = table.item(row, column)
+            
+            if field_name in ('color_hex', 'color_rgb'):
+                # Special handling for color - update background and text
+                if isinstance(value, tuple):
+                    # RGB tuple - convert to hex for display
+                    hex_value = UIElement._rgb_to_hex(value)
+                else:
+                    hex_value = str(value)
+                
+                if item is None:
+                    item = QTableWidgetItem(hex_value)
+                    table.setItem(row, column, item)
+                else:
+                    item.setText(hex_value)
+                
+                # Update background color
+                try:
+                    qcolor = QColor(hex_value)
+                    item.setBackground(QBrush(qcolor))
+                    # Get current element for brightness calculation
+                    id_item = table.item(row, 0)
+                    if id_item is not None:
+                        elem = id_item.data(Qt.UserRole)
+                        if elem is not None:
+                            brightness = (elem.color_rgb[0] * 299 +
+                                        elem.color_rgb[1] * 587 +
+                                        elem.color_rgb[2] * 114) / 1000
+                            if brightness > 128:
+                                item.setForeground(QBrush(QColor("black")))
+                            else:
+                                item.setForeground(QBrush(QColor("white")))
+                except:
+                    pass
+            else:
+                # Regular text field
+                text_value = str(value)
+                if item is None:
+                    item = QTableWidgetItem(text_value)
+                    table.setItem(row, column, item)
+                else:
+                    item.setText(text_value)
 
 
 class UI2CodeSuperEngine:

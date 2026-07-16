@@ -58,7 +58,7 @@ if _QT_AVAILABLE:
             self.type_edit = QLineEdit()
             self.category_edit = QLineEdit()
             self.color_rgb_edit = QLineEdit()
-            self.color_hfx_edit = QLineEdit()
+            self.color_hex_edit = QLineEdit()
             self.x_edit = QLineEdit()
             self.y_edit = QLineEdit()
             self.w_edit = QLineEdit()
@@ -70,7 +70,7 @@ if _QT_AVAILABLE:
             layout.addRow("Type:", self.type_edit)
             layout.addRow("Categorie:", self.category_edit)
             layout.addRow("Kleur (RGB):", self.color_rgb_edit)
-            layout.addRow("Kleur (HFX):", self.color_hfx_edit)
+            layout.addRow("Kleur (HEX):", self.color_hex_edit)
             layout.addRow("X:", self.x_edit)
             layout.addRow("Y:", self.y_edit)
             layout.addRow("W:", self.w_edit)
@@ -90,7 +90,7 @@ if _QT_AVAILABLE:
                 "type": self.type_edit.text(),
                 "category": self.category_edit.text(),
                 "color_rgb": self.color_rgb_edit.text(),
-                "color_hfx": self.color_hfx_edit.text(),
+                "color_hex": self.color_hex_edit.text(),
                 "x": self.x_edit.text(),
                 "y": self.y_edit.text(),
                 "w": self.w_edit.text(),
@@ -108,7 +108,7 @@ if _QT_AVAILABLE:
             self.type_edit.setText(str(data.get("type", "")))
             self.category_edit.setText(str(data.get("category", "")))
             self.color_rgb_edit.setText(str(data.get("color_rgb", "")))
-            self.color_hfx_edit.setText(str(data.get("color_hfx", "")))
+            self.color_hex_edit.setText(str(data.get("color_hex", "")))
             self.x_edit.setText(str(data.get("x", "")))
             self.y_edit.setText(str(data.get("y", "")))
             self.w_edit.setText(str(data.get("w", "")))

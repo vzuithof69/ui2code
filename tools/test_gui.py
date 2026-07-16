@@ -55,7 +55,7 @@ def test_gui_creation() -> bool:
             "type": "button",
             "category": "controls",
             "color_rgb": "255,128,64",
-            "color_hfx": "#FF8040",
+            "color_hex": "#FF8040",
             "x": "100",
             "y": "200",
             "w": "150",

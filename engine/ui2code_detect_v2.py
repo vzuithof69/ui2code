@@ -90,13 +90,17 @@ class UI2CodeDetect:
             ValueError: If image data is invalid or missing.
             FileNotFoundError: If image file does not exist.
         """
+        import sys
         start_time = time.time()
         
         def log(msg: str):
             if logger:
                 logger.info(msg)
             else:
-                print(msg)
+                print(msg, flush=True)
+            # Force flush
+            sys.stdout.flush()
+            sys.stderr.flush()
         
         if not _QT_AVAILABLE:
             raise ImportError(
@@ -104,7 +108,9 @@ class UI2CodeDetect:
             )
 
         # Load image
+        log("DETECT_START: Loading image...")
         image = self._load_image(image_data, image_path)
+        log("DETECT: Image loaded")
 
         if image is None:
             raise ValueError("Failed to load image data")
@@ -113,6 +119,8 @@ class UI2CodeDetect:
         original_width = image.width()
         original_height = image.height()
         scale_factor = 1.0
+        
+        log(f"DETECT: Original image size: {original_width}x{original_height}")
         
         if original_width > MAX_IMAGE_DIMENSION or original_height > MAX_IMAGE_DIMENSION:
             scale_factor = min(MAX_IMAGE_DIMENSION / original_width, MAX_IMAGE_DIMENSION / original_height)
@@ -123,8 +131,10 @@ class UI2CodeDetect:
                 Qt.KeepAspectRatio,
                 Qt.SmoothTransformation
             )
+            log(f"DETECT: Image downscaled to {image.width()}x{image.height()}")
         
         log(f"Processing image: {image.width()}x{image.height()} pixels")
+        log("DETECT: Starting multi-pass detection...")
 
         # Run multi-pass detection
         all_elements: List[UIElement] = []
@@ -133,54 +143,67 @@ class UI2CodeDetect:
         # Pass A: Contour detection
         try:
             t0 = time.time()
+            log("PASS_CONTOUR_START")
+            sys.stdout.flush()
             contour_elements = self._detect_contours(image)
-            log(f"Contour pass: {len(contour_elements)} candidates in {time.time()-t0:.3f}s")
+            log(f"PASS_CONTOUR_END: {len(contour_elements)} candidates in {time.time()-t0:.3f}s")
             all_elements.extend(contour_elements)
             pass_times['contour'] = time.time() - t0
         except Exception as e:
-            log(f"Contour pass failed: {e}")
+            log(f"PASS_CONTOUR_FAILED: {e}")
+            import traceback
+            log(f"Traceback: {traceback.format_exc()}")
 
         # Pass B: Color plane detection
         try:
             t0 = time.time()
+            log("PASS_COLOR_START")
+            sys.stdout.flush()
             color_elements = self._detect_color_planes(image)
-            log(f"Color pass: {len(color_elements)} candidates in {time.time()-t0:.3f}s")
+            log(f"PASS_COLOR_END: {len(color_elements)} candidates in {time.time()-t0:.3f}s")
             all_elements.extend(color_elements)
             pass_times['color'] = time.time() - t0
         except Exception as e:
-            log(f"Color pass failed: {e}")
+            log(f"PASS_COLOR_FAILED: {e}")
 
         # Pass C: Line detection (LIMITED - this was likely the culprit)
         try:
             t0 = time.time()
+            log("PASS_LINES_START")
+            sys.stdout.flush()
             line_elements = self._detect_lines_limited(image, max_candidates=100)
-            log(f"Line pass: {len(line_elements)} candidates in {time.time()-t0:.3f}s")
+            log(f"PASS_LINES_END: {len(line_elements)} candidates in {time.time()-t0:.3f}s")
             all_elements.extend(line_elements)
             pass_times['lines'] = time.time() - t0
         except Exception as e:
-            log(f"Line pass failed: {e}")
+            log(f"PASS_LINES_FAILED: {e}")
 
         # Pass D: Connected components (LIMITED)
         try:
             t0 = time.time()
+            log("PASS_CONNECTED_START")
+            sys.stdout.flush()
             connected_elements = self._detect_connected_components_limited(image, max_candidates=200)
-            log(f"Connected components pass: {len(connected_elements)} candidates in {time.time()-t0:.3f}s")
+            log(f"PASS_CONNECTED_END: {len(connected_elements)} candidates in {time.time()-t0:.3f}s")
             all_elements.extend(connected_elements)
             pass_times['connected'] = time.time() - t0
         except Exception as e:
-            log(f"Connected components pass failed: {e}")
+            log(f"PASS_CONNECTED_FAILED: {e}")
 
         # Pass E: Text zone candidates (LIMITED)
         try:
             t0 = time.time()
+            log("PASS_TEXT_START")
+            sys.stdout.flush()
             text_elements = self._detect_text_zones_limited(image, max_candidates=100)
-            log(f"Text zones pass: {len(text_elements)} candidates in {time.time()-t0:.3f}s")
+            log(f"PASS_TEXT_END: {len(text_elements)} candidates in {time.time()-t0:.3f}s")
             all_elements.extend(text_elements)
             pass_times['text'] = time.time() - t0
         except Exception as e:
-            log(f"Text zones pass failed: {e}")
+            log(f"PASS_TEXT_FAILED: {e}")
 
         log(f"Total candidates before fusion: {len(all_elements)}")
+        sys.stdout.flush()
 
         # Limit total candidates before expensive operations
         if len(all_elements) > MAX_TOTAL_CANDIDATES:
@@ -191,31 +214,37 @@ class UI2CodeDetect:
         # Fuse results: remove duplicates, filter, sort
         try:
             t0 = time.time()
+            log("PASS_FUSION_START")
+            sys.stdout.flush()
             fused_elements = self._fuse_results(all_elements, image.width(), image.height(), logger=logger)
             pass_times['fusion'] = time.time() - t0
-            log(f"Fusion: {len(fused_elements)} elements after filtering in {pass_times['fusion']:.3f}s")
+            log(f"PASS_FUSION_END: {len(fused_elements)} elements after filtering in {pass_times['fusion']:.3f}s")
         except Exception as e:
-            log(f"Fusion failed: {e}")
+            log(f"PASS_FUSION_FAILED: {e}")
             fused_elements = all_elements
 
         # Classify elements
         try:
             t0 = time.time()
+            log("PASS_CLASSIFICATION_START")
+            sys.stdout.flush()
             classified_elements = self._classify_elements(fused_elements)
             pass_times['classification'] = time.time() - t0
-            log(f"Classification: {len(classified_elements)} elements in {pass_times['classification']:.3f}s")
+            log(f"PASS_CLASSIFICATION_END: {len(classified_elements)} elements in {pass_times['classification']:.3f}s")
         except Exception as e:
-            log(f"Classification failed: {e}")
+            log(f"PASS_CLASSIFICATION_FAILED: {e}")
             classified_elements = fused_elements
 
         # Build hierarchy
         try:
             t0 = time.time()
+            log("PASS_HIERARCHY_START")
+            sys.stdout.flush()
             hierarchical_elements = self._build_hierarchy(classified_elements)
             pass_times['hierarchy'] = time.time() - t0
-            log(f"Hierarchy: completed in {pass_times['hierarchy']:.3f}s")
+            log(f"PASS_HIERARCHY_END: completed in {pass_times['hierarchy']:.3f}s")
         except Exception as e:
-            log(f"Hierarchy failed: {e}")
+            log(f"PASS_HIERARCHY_FAILED: {e}")
             hierarchical_elements = classified_elements
 
         # Scale coordinates back to original image size
@@ -226,10 +255,13 @@ class UI2CodeDetect:
                 elem.y = int(elem.y / scale_factor)
                 elem.width = int(elem.width / scale_factor)
                 elem.height = int(elem.height / scale_factor)
+            log("PASS_RESCALE_END")
 
         total_time = time.time() - start_time
-        log(f"Total detection time: {total_time:.3f}s")
+        log(f"DETECT_COMPLETE: Total detection time: {total_time:.3f}s")
         log(f"Pass times: {pass_times}")
+        log(f"Final element count: {len(hierarchical_elements)}")
+        sys.stdout.flush()
 
         return hierarchical_elements
 
@@ -246,31 +278,67 @@ class UI2CodeDetect:
         return f"elem_{source}_{self._element_counter:04d}"
 
     def _detect_contours(self, image: "QImage") -> List[UIElement]:
-        """Detect UI elements using contour detection (existing method)."""
+        """Detect UI elements using contour detection (existing method).
+        
+        Optimized with sampling for large images.
+        """
+        import sys
         elements: List[UIElement] = []
         width = image.width()
         height = image.height()
-
-        # Create grayscale buffer
-        gray = [[0] * width for _ in range(height)]
-        for y in range(height):
-            for x in range(width):
+        
+        print(f"CONTOUR_DEBUG: Image size {width}x{height}", flush=True)
+        sys.stdout.flush()
+        
+        # Use sampling for large images
+        sample_rate = max(1, min(width, height) // 800)
+        print(f"CONTOUR_DEBUG: Sample rate {sample_rate}", flush=True)
+        sys.stdout.flush()
+        
+        # Create grayscale buffer with sampling
+        sampled_w = (width - 1) // sample_rate + 1
+        sampled_h = (height - 1) // sample_rate + 1
+        
+        print(f"CONTOUR_DEBUG: Creating gray buffer {sampled_w}x{sampled_h}", flush=True)
+        sys.stdout.flush()
+        
+        gray = [[0] * sampled_w for _ in range(sampled_h)]
+        for y in range(0, height, sample_rate):
+            for x in range(0, width, sample_rate):
                 pixel = image.pixel(x, y)
                 color = QColor(pixel)
-                gray[y][x] = int((color.red() + color.green() + color.blue()) / 3)
-
-        # Find edges
-        edges = self._find_edges(gray, width, height)
-        regions = self._find_rectangular_regions(edges, width, height)
-
+                gray[y // sample_rate][x // sample_rate] = int(
+                    (color.red() + color.green() + color.blue()) / 3
+                )
+        
+        print(f"CONTOUR_DEBUG: Gray buffer created", flush=True)
+        sys.stdout.flush()
+        
+        # Find edges with sampling
+        edges = self._find_edges(gray, sampled_w, sampled_h)
+        
+        print(f"CONTOUR_DEBUG: Finding rectangular regions", flush=True)
+        sys.stdout.flush()
+        
+        regions = self._find_rectangular_regions(edges, sampled_w, sampled_h)
+        
+        print(f"CONTOUR_DEBUG: Found {len(regions)} regions", flush=True)
+        sys.stdout.flush()
+        
         for idx, region in enumerate(regions):
             x, y, w, h = region
+            # Scale back to original coordinates
+            x *= sample_rate
+            y *= sample_rate
+            w = max(w * sample_rate, sample_rate)
+            h = max(h * sample_rate, sample_rate)
+            
             color_rgb = self._get_region_color(image, x, y, w, h)
             color_hex = UIElement._rgb_to_hex(color_rgb)
-
+            
             # Calculate confidence based on rectangularity and contrast
             confidence = self._calculate_confidence(image, x, y, w, h, gray, edges)
-
+            
             element = UIElement(
                 id=self._generate_element_id("contour"),
                 name=f"Element_{idx:04d}",
@@ -286,7 +354,10 @@ class UI2CodeDetect:
                 source="contour"
             )
             elements.append(element)
-
+        
+        print(f"CONTOUR_DEBUG: Returning {len(elements)} elements", flush=True)
+        sys.stdout.flush()
+        
         return elements
 
     def _detect_color_planes(self, image: "QImage") -> List[UIElement]:

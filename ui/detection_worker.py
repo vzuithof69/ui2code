@@ -70,16 +70,27 @@ if _QT_AVAILABLE:
             
             This method is called by the QThread and runs in the worker thread.
             """
-            import logging
+            import sys
             from tools.ui2code_logging import get_logger
+            
+            # Force flush stdout/stderr for immediate logging
+            sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
+            sys.stderr = os.fdopen(sys.stderr.fileno(), 'w', buffering=1)
             
             logger = get_logger()
             
             try:
+                logger.info("WORKER_RUN_START")
+                sys.stdout.flush()
+                
                 self.started.emit()
+                logger.info("WORKER_STARTED_EMITTED")
+                sys.stdout.flush()
                 
                 # Create detector
                 detector = UI2CodeDetectV2(config=self.detection_config)
+                logger.info("Detector created")
+                sys.stdout.flush()
                 
                 # Custom log handler that emits signals
                 class SignalLogger:
@@ -88,45 +99,81 @@ if _QT_AVAILABLE:
                     
                     def info(self, msg: str):
                         self.worker.progress.emit(msg)
+                        sys.stdout.flush()
                     
                     def warning(self, msg: str):
                         self.worker.progress.emit(f"WARNING: {msg}")
+                        sys.stdout.flush()
                     
                     def error(self, msg: str):
                         self.worker.progress.emit(f"ERROR: {msg}")
+                        sys.stdout.flush()
                 
                 signal_logger = SignalLogger(self)
+                logger.info("SignalLogger created")
+                sys.stdout.flush()
                 
                 # Run detection
                 self.progress.emit(f"Starting detection on: {self.image_path}")
+                logger.info(f"Starting detection: {self.image_path}")
+                sys.stdout.flush()
                 
                 if self._cancelled:
+                    logger.info("WORKER_CANCELLED_BEFORE_START")
+                    sys.stdout.flush()
                     self.finished.emit()
                     return
+                
+                logger.info("Calling detector.detect_elements()...")
+                sys.stdout.flush()
                 
                 elements = detector.detect_elements(
                     image_data=self.image_path,
                     logger=signal_logger
                 )
                 
+                logger.info(f"Detection returned {len(elements)} elements")
+                sys.stdout.flush()
+                
                 if self._cancelled:
+                    logger.info("WORKER_CANCELLED_AFTER_DETECTION")
+                    sys.stdout.flush()
                     self.finished.emit()
                     return
                 
                 # Emit result
+                logger.info("Emitting result_ready...")
+                sys.stdout.flush()
                 self.result_ready.emit(elements)
+                logger.info("RESULT_READY_EMITTED")
+                sys.stdout.flush()
                 
-            except Exception as e:
-                # Capture full traceback
+            except BaseException as e:
+                # Capture full traceback - use BaseException to catch ALL exceptions
+                import traceback
                 tb_str = traceback.format_exc()
-                self.error.emit(str(e), tb_str)
+                logger.exception(f"WORKER_EXCEPTION: {e}")
+                logger.error(f"Traceback: {tb_str}")
+                sys.stdout.flush()
                 
-                # Also log to file
-                if logger:
-                    logger.exception(f"Detection failed: {e}")
-            
+                self.error.emit(str(e), tb_str)
+                logger.info("ERROR_SIGNAL_EMITTED")
+                sys.stdout.flush()
+                
             finally:
-                self.finished.emit()
+                # ALWAYS emit finished - this is critical
+                logger.info("WORKER_FINALLY_BLOCK")
+                sys.stdout.flush()
+                
+                try:
+                    self.finished.emit()
+                    logger.info("FINISHED_SIGNAL_EMITTED")
+                except Exception as emit_error:
+                    logger.exception(f"Failed to emit finished: {emit_error}")
+                
+                sys.stdout.flush()
+                logger.info("WORKER_RUN_END")
+                sys.stdout.flush()
     
     
     class DetectionThread(QThread):

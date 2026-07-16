@@ -537,6 +537,8 @@ if _QT_AVAILABLE:
             self._manual_corrections: Dict[str, Dict[str, Any]] = {}  # Store manual corrections by element ID
             self._detection_thread: Optional["DetectionThread"] = None  # type: ignore
             self._detection_in_progress: bool = False
+            self._watchdog_timer: Optional[Any] = None  # type: ignore
+            self._watchdog_timeout: int = 60  # seconds
             
             # Initialize logging
             global _logger
@@ -862,6 +864,7 @@ if _QT_AVAILABLE:
             
             # Create worker thread
             from ui.detection_worker import DetectionThread
+            from PySide6.QtCore import QTimer
             
             self._detection_thread = DetectionThread(
                 image_path=self._current_image_path,
@@ -869,20 +872,64 @@ if _QT_AVAILABLE:
                 parent=self
             )
             
-            # Connect signals
-            self._detection_thread.started.connect(self._on_detection_started)
-            self._detection_thread.progress.connect(self._on_detection_progress)
-            self._detection_thread.result_ready.connect(self._on_detection_result)
-            self._detection_thread.error.connect(self._on_detection_error)
-            self._detection_thread.finished.connect(self._on_detection_finished)
+            # Connect signals (avoid double connections)
+            self._detection_thread.started.connect(self._on_detection_started, Qt.UniqueConnection)
+            self._detection_thread.progress.connect(self._on_detection_progress, Qt.UniqueConnection)
+            self._detection_thread.result_ready.connect(self._on_detection_result, Qt.UniqueConnection)
+            self._detection_thread.error.connect(self._on_detection_error, Qt.UniqueConnection)
+            self._detection_thread.finished.connect(self._on_detection_finished, Qt.UniqueConnection)
             
             # Store corrections for later use
             self._pending_corrections = old_corrections
+            
+            # Start watchdog timer
+            self._start_watchdog()
             
             # Start thread
             self._detection_in_progress = True
             _logger.info("Start detectie in achtergrondthread")
             self._detection_thread.start()
+        
+        def _start_watchdog(self) -> None:
+            """Start watchdog timer for detection timeout."""
+            from PySide6.QtCore import QTimer
+            
+            self._watchdog_timer = QTimer(self)
+            self._watchdog_timer.timeout.connect(self._on_watchdog_timeout)
+            self._watchdog_timer.setSingleShot(True)
+            self._watchdog_timer.start(self._watchdog_timeout * 1000)  # Convert to ms
+            _logger.info(f"Watchdog started: {self._watchdog_timeout}s timeout")
+        
+        def _stop_watchdog(self) -> None:
+            """Stop watchdog timer."""
+            if self._watchdog_timer:
+                self._watchdog_timer.stop()
+                self._watchdog_timer.deleteLater()
+                self._watchdog_timer = None
+        
+        def _on_watchdog_timeout(self) -> None:
+            """Handle watchdog timeout."""
+            global _logger
+            _logger.error(f"DETECTION_TIMEOUT: Watchdog expired after {self._watchdog_timeout}s")
+            
+            # Cancel the worker
+            if self._detection_thread:
+                _logger.info("Cancelling detection thread due to timeout")
+                self._detection_thread.cancel()
+            
+            # Force reset
+            self._detection_in_progress = False
+            self._set_detection_buttons_enabled(True)
+            
+            # Log error
+            _logger.error("Detection timed out - thread cancelled")
+            
+            QMessageBox.critical(
+                self,
+                "Detectie timeout",
+                f"De detectie duurde te langer dan {self._watchdog_timeout} seconden.\n\n"
+                f"De detectie is afgebroken. Probeer een kleinere afbeelding."
+            )
         
         def _on_detection_started(self) -> None:
             """Handle detection start."""

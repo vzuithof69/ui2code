@@ -535,6 +535,8 @@ if _QT_AVAILABLE:
             self._current_image_path: Optional[str] = None
             self._elements: List[UIElement] = []
             self._manual_corrections: Dict[str, Dict[str, Any]] = {}  # Store manual corrections by element ID
+            self._detection_thread: Optional["DetectionThread"] = None  # type: ignore
+            self._detection_in_progress: bool = False
             
             # Initialize logging
             global _logger
@@ -819,38 +821,94 @@ if _QT_AVAILABLE:
                     "Kies eerst een afbeelding voordat je UI-elementen detecteert."
                 )
                 return
+            
+            # Check if detection is already in progress
+            if self._detection_in_progress:
+                _logger.warning("Detectie al bezig")
+                QMessageBox.warning(
+                    self,
+                    "Detectie bezig",
+                    "Er loopt al een detectie. Wacht tot deze voltooid is."
+                )
+                return
 
             try:
                 # Store manual corrections before re-detection
                 old_corrections = self._store_manual_corrections()
                 _logger.info(f"Handmatige correcties opgeslagen: {len(old_corrections)} element(en)")
                 
-                # Log detectie start
-                _logger.info(f"Start multi-pass detectie - afbeeldingspad: {self._current_image_path}")
+                # Disable buttons during detection
+                self._set_detection_buttons_enabled(False)
                 
-                # Verify file exists
-                if not os.path.exists(self._current_image_path):
-                    _logger.error(f"Afbeeldingsbestand bestaat niet: {self._current_image_path}")
-                    raise FileNotFoundError(f"Image file not found: {self._current_image_path}")
+                # Start detection in worker thread
+                self._start_detection_thread(old_corrections)
                 
-                # Log image info
-                try:
-                    from PySide6.QtGui import QImage
-                    test_img = QImage(self._current_image_path)
-                    _logger.info(
-                        f"Afbeelding geladen: {test_img.width()}x{test_img.height()} pixels"
-                    )
-                except Exception as img_err:
-                    _logger.warning(f"Kon afbeeldingsinformatie niet lezen: {img_err}")
-                
-                # Run multi-pass detection
-                _logger.info("Roep detect_elements() aan met Fase 3B multi-pass detectie")
-                elements = self.detector.detect_elements(image_data=self._current_image_path)
-                
-                # Preserve manual corrections
-                preserved_count = self._preserve_manual_corrections(elements, old_corrections)
-                _logger.info(f"Handmatige correcties behouden: {preserved_count} element(en)")
-                
+            except Exception as e:
+                _logger.exception("Fout bij starten detectie")
+                QMessageBox.critical(
+                    self,
+                    "Fout",
+                    f"Kon detectie niet starten:\n{str(e)}"
+                )
+                self._set_detection_buttons_enabled(True)
+        
+        def _start_detection_thread(self, old_corrections: Dict[str, Dict[str, Any]]) -> None:
+            """Start detection in a background thread.
+            
+            Args:
+                old_corrections: Manual corrections to preserve.
+            """
+            global _logger
+            
+            # Create worker thread
+            from ui.detection_worker import DetectionThread
+            
+            self._detection_thread = DetectionThread(
+                image_path=self._current_image_path,
+                detection_config=self.detector.config,
+                parent=self
+            )
+            
+            # Connect signals
+            self._detection_thread.started.connect(self._on_detection_started)
+            self._detection_thread.progress.connect(self._on_detection_progress)
+            self._detection_thread.result_ready.connect(self._on_detection_result)
+            self._detection_thread.error.connect(self._on_detection_error)
+            self._detection_thread.finished.connect(self._on_detection_finished)
+            
+            # Store corrections for later use
+            self._pending_corrections = old_corrections
+            
+            # Start thread
+            self._detection_in_progress = True
+            _logger.info("Start detectie in achtergrondthread")
+            self._detection_thread.start()
+        
+        def _on_detection_started(self) -> None:
+            """Handle detection start."""
+            global _logger
+            _logger.info("Detectie gestart in achtergrond")
+        
+        def _on_detection_progress(self, message: str) -> None:
+            """Handle detection progress message.
+            
+            Args:
+                message: Progress message from detector.
+            """
+            global _logger
+            _logger.info(message)
+        
+        def _on_detection_result(self, elements: List[UIElement]) -> None:
+            """Handle detection result.
+            
+            This runs in the GUI thread.
+            
+            Args:
+                elements: List of detected UI elements.
+            """
+            global _logger
+            
+            try:
                 # Log resultaat
                 _logger.info(f"Detectie voltooid - {len(elements)} element(en) gedetecteerd")
                 
@@ -867,6 +925,12 @@ if _QT_AVAILABLE:
                         f"Confidence statistieken: min={min(confidences):.3f}, "
                         f"max={max(confidences):.3f}, avg={sum(confidences)/len(confidences):.3f}"
                     )
+                
+                # Preserve manual corrections
+                if hasattr(self, '_pending_corrections'):
+                    preserved_count = self._preserve_manual_corrections(elements, self._pending_corrections)
+                    _logger.info(f"Handmatige correcties behouden: {preserved_count} element(en)")
+                    del self._pending_corrections
                 
                 # Store elements
                 self._elements = elements
@@ -894,28 +958,57 @@ if _QT_AVAILABLE:
                         "Geen elementen",
                         "Geen UI-elementen gedetecteerd in deze afbeelding."
                     )
-
-            except FileNotFoundError as e:
-                _logger.exception("Bestand niet gevonden tijdens detectie")
-                QMessageBox.critical(
-                    self,
-                    "Bestand niet gevonden",
-                    f"Afbeelding niet gevonden:\n{e}"
-                )
-            except ImportError as e:
-                _logger.exception("Import error tijdens detectie")
-                QMessageBox.critical(
-                    self,
-                    "Import error",
-                    f"Qt libraries niet beschikbaar:\n{e}"
-                )
+            
             except Exception as e:
-                _logger.exception("Onverwachte fout tijdens detectie")
+                _logger.exception("Fout bij verwerken detectieresultaat")
                 QMessageBox.critical(
                     self,
-                    "Detectiefout",
-                    f"Er is een fout opgetreden bij het detecteren:\n{str(e)}"
+                    "Fout",
+                    f"Fout bij verwerken resultaat:\n{str(e)}"
                 )
+        
+        def _on_detection_error(self, error_message: str, traceback_str: str) -> None:
+            """Handle detection error.
+            
+            This runs in the GUI thread.
+            
+            Args:
+                error_message: Error message.
+                traceback_str: Full traceback string.
+            """
+            global _logger
+            _logger.error(f"Detectiefout: {error_message}")
+            _logger.error(f"Traceback:\n{traceback_str}")
+            
+            QMessageBox.critical(
+                self,
+                "Detectiefout",
+                f"Er is een fout opgetreden:\n{error_message}\n\n"
+                f"Zie logs/latest-error.log voor details."
+            )
+        
+        def _on_detection_finished(self) -> None:
+            """Handle detection completion (success or failure)."""
+            self._detection_in_progress = False
+            self._set_detection_buttons_enabled(True)
+            
+            # Clean up thread
+            if self._detection_thread:
+                self._detection_thread.deleteLater()
+                self._detection_thread = None
+        
+        def _set_detection_buttons_enabled(self, enabled: bool) -> None:
+            """Enable or disable detection-related buttons.
+            
+            Args:
+                enabled: Whether buttons should be enabled.
+            """
+            self.btn_detect_ui.setEnabled(enabled)
+            self.btn_choose_image.setEnabled(enabled)
+            if enabled:
+                self.btn_detect_ui.setCursor(Qt.ArrowCursor)
+            else:
+                self.btn_detect_ui.setCursor(Qt.WaitCursor)
 
         def _store_manual_corrections(self) -> Dict[str, Dict[str, Any]]:
             """Store current manual corrections.

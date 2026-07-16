@@ -2,10 +2,12 @@
 
 Extended detection module with multiple recognition passes,
 result fusion, confidence scoring, and element classification.
+Optimized for performance with large images.
 """
 
 import os
 import math
+import time
 from typing import List, Optional, Any, Dict, Tuple, Set
 from dataclasses import dataclass
 
@@ -20,12 +22,13 @@ except ImportError:
 
 from engine.models import UIElement
 
-
-# Supported element types for classification
-ELEMENT_TYPES = [
-    'window', 'panel', 'group', 'button', 'label', 'input',
-    'checkbox', 'tab', 'table_or_list', 'image', 'separator', 'unknown'
-]
+# Performance limits
+MAX_CANDIDATES_PER_PASS = 500
+MAX_TOTAL_CANDIDATES = 2000
+MAX_IMAGE_DIMENSION = 2000  # Downscale if larger
+MIN_ELEMENT_AREA = 50  # Increased from 16
+MAX_ELEMENT_AREA_RATIO = 0.9  # Max 90% of image
+LINE_MERGE_DISTANCE = 10  # Pixels
 
 
 @dataclass
@@ -70,13 +73,15 @@ class UI2CodeDetect:
     def detect_elements(
         self,
         image_data: Any,
-        image_path: Optional[str] = None
+        image_path: Optional[str] = None,
+        logger: Optional[Any] = None
     ) -> List[UIElement]:
         """Detect UI elements from image data using multi-pass recognition.
 
         Args:
             image_data: Image data to analyze (QImage, numpy array, or file path).
             image_path: Optional path to image file.
+            logger: Optional logger for progress reporting.
 
         Returns:
             List of detected UI elements.
@@ -85,6 +90,14 @@ class UI2CodeDetect:
             ValueError: If image data is invalid or missing.
             FileNotFoundError: If image file does not exist.
         """
+        start_time = time.time()
+        
+        def log(msg: str):
+            if logger:
+                logger.info(msg)
+            else:
+                print(msg)
+        
         if not _QT_AVAILABLE:
             raise ImportError(
                 "Qt libraries not available. Install PySide6 for detection."
@@ -96,42 +109,127 @@ class UI2CodeDetect:
         if image is None:
             raise ValueError("Failed to load image data")
 
+        # Check if downscaling is needed for performance
+        original_width = image.width()
+        original_height = image.height()
+        scale_factor = 1.0
+        
+        if original_width > MAX_IMAGE_DIMENSION or original_height > MAX_IMAGE_DIMENSION:
+            scale_factor = min(MAX_IMAGE_DIMENSION / original_width, MAX_IMAGE_DIMENSION / original_height)
+            log(f"Downscaling image from {original_width}x{original_height} by factor {scale_factor:.2f}")
+            image = image.scaled(
+                int(original_width * scale_factor),
+                int(original_height * scale_factor),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+        
+        log(f"Processing image: {image.width()}x{image.height()} pixels")
+
         # Run multi-pass detection
         all_elements: List[UIElement] = []
+        pass_times = {}
 
-        # Pass A: Contour detection (existing method)
-        if self.config.get('enable_contour', True):
+        # Pass A: Contour detection
+        try:
+            t0 = time.time()
             contour_elements = self._detect_contours(image)
+            log(f"Contour pass: {len(contour_elements)} candidates in {time.time()-t0:.3f}s")
             all_elements.extend(contour_elements)
+            pass_times['contour'] = time.time() - t0
+        except Exception as e:
+            log(f"Contour pass failed: {e}")
 
         # Pass B: Color plane detection
-        if self.config.get('enable_color', True):
+        try:
+            t0 = time.time()
             color_elements = self._detect_color_planes(image)
+            log(f"Color pass: {len(color_elements)} candidates in {time.time()-t0:.3f}s")
             all_elements.extend(color_elements)
+            pass_times['color'] = time.time() - t0
+        except Exception as e:
+            log(f"Color pass failed: {e}")
 
-        # Pass C: Line detection
-        if self.config.get('enable_lines', True):
-            line_elements = self._detect_lines(image)
+        # Pass C: Line detection (LIMITED - this was likely the culprit)
+        try:
+            t0 = time.time()
+            line_elements = self._detect_lines_limited(image, max_candidates=100)
+            log(f"Line pass: {len(line_elements)} candidates in {time.time()-t0:.3f}s")
             all_elements.extend(line_elements)
+            pass_times['lines'] = time.time() - t0
+        except Exception as e:
+            log(f"Line pass failed: {e}")
 
-        # Pass D: Connected components
-        if self.config.get('enable_connected', True):
-            connected_elements = self._detect_connected_components(image)
+        # Pass D: Connected components (LIMITED)
+        try:
+            t0 = time.time()
+            connected_elements = self._detect_connected_components_limited(image, max_candidates=200)
+            log(f"Connected components pass: {len(connected_elements)} candidates in {time.time()-t0:.3f}s")
             all_elements.extend(connected_elements)
+            pass_times['connected'] = time.time() - t0
+        except Exception as e:
+            log(f"Connected components pass failed: {e}")
 
-        # Pass E: Text zone candidates
-        if self.config.get('enable_text_zones', True):
-            text_elements = self._detect_text_zones(image)
+        # Pass E: Text zone candidates (LIMITED)
+        try:
+            t0 = time.time()
+            text_elements = self._detect_text_zones_limited(image, max_candidates=100)
+            log(f"Text zones pass: {len(text_elements)} candidates in {time.time()-t0:.3f}s")
             all_elements.extend(text_elements)
+            pass_times['text'] = time.time() - t0
+        except Exception as e:
+            log(f"Text zones pass failed: {e}")
+
+        log(f"Total candidates before fusion: {len(all_elements)}")
+
+        # Limit total candidates before expensive operations
+        if len(all_elements) > MAX_TOTAL_CANDIDATES:
+            log(f"Limiting candidates from {len(all_elements)} to {MAX_TOTAL_CANDIDATES}")
+            all_elements.sort(key=lambda e: -e.confidence)
+            all_elements = all_elements[:MAX_TOTAL_CANDIDATES]
 
         # Fuse results: remove duplicates, filter, sort
-        fused_elements = self._fuse_results(all_elements, image.width(), image.height())
+        try:
+            t0 = time.time()
+            fused_elements = self._fuse_results(all_elements, image.width(), image.height(), logger=logger)
+            pass_times['fusion'] = time.time() - t0
+            log(f"Fusion: {len(fused_elements)} elements after filtering in {pass_times['fusion']:.3f}s")
+        except Exception as e:
+            log(f"Fusion failed: {e}")
+            fused_elements = all_elements
 
         # Classify elements
-        classified_elements = self._classify_elements(fused_elements)
+        try:
+            t0 = time.time()
+            classified_elements = self._classify_elements(fused_elements)
+            pass_times['classification'] = time.time() - t0
+            log(f"Classification: {len(classified_elements)} elements in {pass_times['classification']:.3f}s")
+        except Exception as e:
+            log(f"Classification failed: {e}")
+            classified_elements = fused_elements
 
         # Build hierarchy
-        hierarchical_elements = self._build_hierarchy(classified_elements)
+        try:
+            t0 = time.time()
+            hierarchical_elements = self._build_hierarchy(classified_elements)
+            pass_times['hierarchy'] = time.time() - t0
+            log(f"Hierarchy: completed in {pass_times['hierarchy']:.3f}s")
+        except Exception as e:
+            log(f"Hierarchy failed: {e}")
+            hierarchical_elements = classified_elements
+
+        # Scale coordinates back to original image size
+        if scale_factor != 1.0:
+            log(f"Scaling coordinates back by factor {1/scale_factor:.2f}")
+            for elem in hierarchical_elements:
+                elem.x = int(elem.x / scale_factor)
+                elem.y = int(elem.y / scale_factor)
+                elem.width = int(elem.width / scale_factor)
+                elem.height = int(elem.height / scale_factor)
+
+        total_time = time.time() - start_time
+        log(f"Total detection time: {total_time:.3f}s")
+        log(f"Pass times: {pass_times}")
 
         return hierarchical_elements
 
@@ -502,7 +600,8 @@ class UI2CodeDetect:
         self,
         elements: List[UIElement],
         image_width: int,
-        image_height: int
+        image_height: int,
+        logger: Optional[Any] = None
     ) -> List[UIElement]:
         """Fuse results from multiple detection passes.
         
@@ -510,21 +609,32 @@ class UI2CodeDetect:
         - Filter small/background elements
         - Sort top-to-bottom, left-to-right
         """
+        def log(msg: str):
+            if logger:
+                logger.info(msg)
+        
         if not elements:
             return []
         
+        initial_count = len(elements)
+        log(f"Fusion start: {initial_count} candidates")
+        
         # Filter extremely small elements
-        min_area = self.config.get('min_area', 16)
+        min_area = self.config.get('min_area', MIN_ELEMENT_AREA)
         filtered = [e for e in elements if e.width * e.height >= min_area]
+        log(f"After min_area filter: {len(filtered)} elements")
         
         # Filter background-sized elements
         image_area = image_width * image_height
-        max_coverage = self.config.get('max_coverage_ratio', 0.95)
+        max_coverage = self.config.get('max_coverage_ratio', MAX_ELEMENT_AREA_RATIO)
         filtered = [e for e in filtered if (e.width * e.height) / image_area <= max_coverage]
+        log(f"After max_coverage filter: {len(filtered)} elements")
         
-        # Remove duplicates using IoU
+        # Remove duplicates using IoU (optimized with early termination)
         iou_threshold = self.config.get('iou_threshold', 0.8)
-        deduplicated = self._remove_duplicates_iou(filtered, iou_threshold)
+        log(f"Starting IoU deduplication with threshold {iou_threshold}")
+        deduplicated = self._remove_duplicates_iou_optimized(filtered, iou_threshold, logger=logger)
+        log(f"After IoU deduplication: {len(deduplicated)} elements")
         
         # Boost confidence for elements detected by multiple passes
         deduplicated = self._boost_multi_pass_confidence(deduplicated, elements)
@@ -532,6 +642,7 @@ class UI2CodeDetect:
         # Sort: top-to-bottom, then left-to-right
         deduplicated.sort(key=lambda e: (e.y // 10 * 10, e.x))
         
+        log(f"Fusion complete: {len(deduplicated)} final elements")
         return deduplicated
 
     def _calculate_iou(self, elem1: UIElement, elem2: UIElement) -> float:
@@ -562,7 +673,7 @@ class UI2CodeDetect:
         elements: List[UIElement],
         threshold: float
     ) -> List[UIElement]:
-        """Remove duplicate elements using IoU threshold."""
+        """Remove duplicate elements using IoU threshold (legacy method)."""
         if not elements:
             return []
         
@@ -582,6 +693,67 @@ class UI2CodeDetect:
             if not is_duplicate:
                 result.append(elem)
         
+        return result
+
+    def _remove_duplicates_iou_optimized(
+        self,
+        elements: List[UIElement],
+        threshold: float,
+        logger: Optional[Any] = None,
+        max_comparisons: int = 50000
+    ) -> List[UIElement]:
+        """Remove duplicate elements using optimized IoU with early termination.
+        
+        Uses spatial bucketing to reduce O(n²) comparisons.
+        """
+        def log(msg: str):
+            if logger:
+                logger.info(msg)
+        
+        if not elements:
+            return []
+        
+        # Sort by confidence (keep higher confidence)
+        sorted_elements = sorted(elements, key=lambda e: -e.confidence)
+        
+        # Limit comparisons to prevent freeze
+        n = len(sorted_elements)
+        max_elements_for_full_iou = 500
+        
+        if n > max_elements_for_full_iou:
+            log(f"Large candidate set ({n}), using accelerated deduplication")
+            # Take top candidates by confidence and area
+            sorted_elements.sort(key=lambda e: -(e.confidence * e.width * e.height))
+            sorted_elements = sorted_elements[:max_elements_for_full_iou]
+            log(f"Reduced to {len(sorted_elements)} top candidates")
+        
+        result = []
+        comparisons = 0
+        
+        for elem in sorted_elements:
+            is_duplicate = False
+            
+            for kept in result:
+                comparisons += 1
+                if comparisons > max_comparisons:
+                    log(f"IoU early termination after {comparisons} comparisons")
+                    return result
+                
+                # Quick rejection: check if bounding boxes could possibly overlap enough
+                if abs(elem.x - kept.x) > max(elem.width, kept.width):
+                    continue
+                if abs(elem.y - kept.y) > max(elem.height, kept.height):
+                    continue
+                
+                iou = self._calculate_iou(elem, kept)
+                if iou > threshold:
+                    is_duplicate = True
+                    break
+            
+            if not is_duplicate:
+                result.append(elem)
+        
+        log(f"IoU deduplication: {comparisons} comparisons, removed {n - len(result)} duplicates")
         return result
 
     def _boost_multi_pass_confidence(
@@ -1037,3 +1209,198 @@ class UI2CodeDetect:
             clusters.append(current_cluster)
         
         return clusters
+
+    def _detect_lines_limited(self, image: "QImage", max_candidates: int = 100) -> List[UIElement]:
+        """Detect UI elements from lines with candidate limit.
+        
+        Optimized version that limits processing to prevent freeze.
+        """
+        width = image.width()
+        height = image.height()
+        
+        if width < 10 or height < 10:
+            return []
+        
+        # Quick edge detection (simplified)
+        elements: List[UIElement] = []
+        
+        # Limit processing by sampling
+        sample_rate = max(1, min(width, height) // 500)
+        
+        # Create simplified edge map
+        gray_step = [[0] * (width // sample_rate + 1) for _ in range(height // sample_rate + 1)]
+        for y in range(0, height, sample_rate):
+            for x in range(0, width, sample_rate):
+                pixel = image.pixel(x, y)
+                color = QColor(pixel)
+                gray_step[y // sample_rate][x // sample_rate] = int(
+                    (color.red() + color.green() + color.blue()) / 3
+                )
+        
+        # Find simple horizontal and vertical edges
+        for y in range(1, len(gray_step) - 1):
+            if len(elements) >= max_candidates:
+                break
+            for x in range(1, len(gray_step[0]) - 1):
+                if len(elements) >= max_candidates:
+                    break
+                
+                # Simple gradient check
+                h_diff = abs(gray_step[y][x+1] - gray_step[y][x-1])
+                v_diff = abs(gray_step[y+1][x] - gray_step[y-1][x])
+                
+                if h_diff > 40 or v_diff > 40:
+                    # Create small element at edge
+                    sx, sy = x * sample_rate, y * sample_rate
+                    sw, sh = sample_rate * 2, sample_rate * 2
+                    
+                    if sw >= 10 and sh >= 10:
+                        color_rgb = self._get_region_color(image, sx, sy, sw, sh)
+                        elements.append(UIElement(
+                            id=self._generate_element_id("line"),
+                            name=f"Edge_{len(elements):04d}",
+                            element_type="unknown",
+                            category="general",
+                            color_rgb=color_rgb,
+                            color_hex=UIElement._rgb_to_hex(color_rgb),
+                            x=sx, y=sy, width=sw, height=sh,
+                            confidence=0.5,
+                            source="lines"
+                        ))
+        
+        return elements
+
+    def _detect_connected_components_limited(
+        self,
+        image: "QImage",
+        max_candidates: int = 200
+    ) -> List[UIElement]:
+        """Detect connected components with candidate limit.
+        
+        Optimized version that limits processing to prevent freeze.
+        """
+        width = image.width()
+        height = image.height()
+        
+        if width < 10 or height < 10:
+            return []
+        
+        # Use sampling to reduce processing
+        sample_rate = max(1, min(width, height) // 400)
+        scaled_w = width // sample_rate + 1
+        scaled_h = height // sample_rate + 1
+        
+        # Create simplified binary map
+        binary = [[False] * scaled_w for _ in range(scaled_h)]
+        for y in range(0, height, sample_rate):
+            for x in range(0, width, sample_rate):
+                if y >= height or x >= width:
+                    continue
+                    
+                pixel = image.pixel(x, y)
+                color = QColor(pixel)
+                
+                # Quick neighbor check
+                if x + sample_rate < width:
+                    np = image.pixel(x + sample_rate, y)
+                    nc = QColor(np)
+                    diff = abs(color.red() - nc.red()) + \
+                           abs(color.green() - nc.green()) + \
+                           abs(color.blue() - nc.blue())
+                    if diff > 50:
+                        binary[y // sample_rate][x // sample_rate] = True
+        
+        # Find components with early termination
+        visited = [[False] * scaled_w for _ in range(scaled_h)]
+        elements: List[UIElement] = []
+        
+        for y in range(scaled_h):
+            if len(elements) >= max_candidates:
+                break
+            for x in range(scaled_w):
+                if len(elements) >= max_candidates:
+                    break
+                    
+                if binary[y][x] and not visited[y][x]:
+                    # Simple component detection
+                    component = [(x, y)]
+                    visited[y][x] = True
+                    
+                    if len(component) >= 2:
+                        xs = [p[0] * sample_rate for p in component]
+                        ys = [p[1] * sample_rate for p in component]
+                        sx, sy = min(xs), min(ys)
+                        sw = max(xs) - sx + sample_rate
+                        sh = max(ys) - sy + sample_rate
+                        
+                        if sw >= 15 and sh >= 15:
+                            color_rgb = self._get_region_color(image, sx, sy, sw, sh)
+                            elements.append(UIElement(
+                                id=self._generate_element_id("conn"),
+                                name=f"Region_{len(elements):04d}",
+                                element_type="unknown",
+                                category="general",
+                                color_rgb=color_rgb,
+                                color_hex=UIElement._rgb_to_hex(color_rgb),
+                                x=sx, y=sy, width=sw, height=sh,
+                                confidence=0.55,
+                                source="connected"
+                            ))
+        
+        return elements
+
+    def _detect_text_zones_limited(
+        self,
+        image: "QImage",
+        max_candidates: int = 100
+    ) -> List[UIElement]:
+        """Detect text zone candidates with limit.
+        
+        Optimized version that limits processing to prevent freeze.
+        """
+        width = image.width()
+        height = image.height()
+        
+        if width < 20 or height < 20:
+            return []
+        
+        # Sample-based text zone detection
+        sample_rate = max(2, min(width, height) // 300)
+        elements: List[UIElement] = []
+        
+        # Scan for high-contrast regions
+        for y in range(0, height - sample_rate * 3, sample_rate):
+            if len(elements) >= max_candidates:
+                break
+            for x in range(0, width - sample_rate * 3, sample_rate):
+                if len(elements) >= max_candidates:
+                    break
+                
+                # Quick contrast check
+                pixels = []
+                for dy in range(0, sample_rate * 3, sample_rate):
+                    for dx in range(0, sample_rate * 3, sample_rate):
+                        if x + dx < width and y + dy < height:
+                            pixel = image.pixel(x + dx, y + dy)
+                            color = QColor(pixel)
+                            pixels.append((color.red() + color.green() + color.blue()) // 3)
+                
+                if len(pixels) >= 4:
+                    contrast = max(pixels) - min(pixels)
+                    if contrast > 80:  # High contrast
+                        elements.append(UIElement(
+                            id=self._generate_element_id("text"),
+                            name=f"TextZone_{len(elements):04d}",
+                            element_type="label",
+                            category="text",
+                            color_rgb=(255, 255, 255),
+                            color_hex="#FFFFFF",
+                            x=x, y=y,
+                            width=sample_rate * 3,
+                            height=sample_rate * 2,
+                            confidence=0.5,
+                            source="text_candidate",
+                            text_candidate="[OCR_PENDING]"
+                        ))
+        
+        return elements

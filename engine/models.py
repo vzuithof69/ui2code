@@ -26,6 +26,9 @@ class UIElement:
         height: Height of the element.
         confidence: Detection confidence (0.0 to 1.0).
         source: Source of detection (e.g., 'contour', 'manual').
+        parent_id: Optional ID of parent element for hierarchy.
+        manually_corrected: Set of field names that were manually edited.
+        text_candidate: Optional text content for text zone candidates.
     """
 
     id: str
@@ -40,6 +43,9 @@ class UIElement:
     height: int
     confidence: float
     source: str = "unknown"
+    parent_id: Optional[str] = None
+    manually_corrected: set = field(default_factory=set)
+    text_candidate: Optional[str] = None
 
     def __post_init__(self) -> None:
         """Validate and normalize the element data."""
@@ -161,7 +167,10 @@ class UIElement:
             "width": self.width,
             "height": self.height,
             "confidence": self.confidence,
-            "source": self.source
+            "source": self.source,
+            "parent_id": self.parent_id,
+            "manually_corrected": list(self.manually_corrected),
+            "text_candidate": self.text_candidate
         }
 
     @classmethod
@@ -179,6 +188,11 @@ class UIElement:
         if isinstance(color_rgb, list):
             color_rgb = tuple(color_rgb)
 
+        # Handle manually_corrected - convert list to set
+        manually_corrected = data.get("manually_corrected", [])
+        if isinstance(manually_corrected, list):
+            manually_corrected = set(manually_corrected)
+
         return cls(
             id=data.get("id", ""),
             name=data.get("name", ""),
@@ -191,7 +205,10 @@ class UIElement:
             width=data.get("width", 0),
             height=data.get("height", 0),
             confidence=data.get("confidence", 0.0),
-            source=data.get("source", "unknown")
+            source=data.get("source", "unknown"),
+            parent_id=data.get("parent_id"),
+            manually_corrected=manually_corrected,
+            text_candidate=data.get("text_candidate")
         )
 
     def __eq__(self, other: Any) -> bool:

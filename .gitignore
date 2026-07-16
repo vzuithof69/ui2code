@@ -23,3 +23,10 @@ Thumbs.db
 output/*.txt
 output/*.json
 output/*.py
+
+# Runtime logs (do not track in git)
+logs/*.log
+logs/latest-error.log
+
+# Keep logs directory structure
+!logs/.gitkeep

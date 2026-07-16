@@ -307,8 +307,13 @@ class UI2CodeDetect:
             _OPENCV_AVAILABLE = True
         except ImportError:
             _OPENCV_AVAILABLE = False
-            print("CONTOUR_WARNING: OpenCV not available, falling back to basic detection", flush=True)
-            return self._detect_contours_basic(image)
+            print("CONTOUR_ERROR: OpenCV not available", flush=True)
+            sys.stdout.flush()
+            # Return empty list - don't fall back to slow method
+            return []
+        
+        # Use centralized QImage conversion
+        from engine.image_utils import qimage_to_bgr
         
         elements: List[UIElement] = []
         width = image.width()
@@ -317,39 +322,19 @@ class UI2CodeDetect:
         print(f"CONTOUR_INFO: Image size {width}x{height}, tile_size={tile_size}, overlap={tile_overlap}", flush=True)
         sys.stdout.flush()
         
-        # Convert QImage to numpy array - COMPATIBLE WITH PySide6 6.11+
-        # DO NOT use ptr.setsize() - it's deprecated
-        # Method: copy image data to bytes, then to numpy
+        start_time = time.time()
         
-        # Get image format info
-        fmt = image.format()
-        
-        # For Format_RGB32 or Format_ARGB32_Premultiplied
-        if fmt in (QImage.Format_RGB32, QImage.Format_ARGB32, QImage.Format_ARGB32_Premultiplied):
-            # Get raw bytes
-            img_bytes = bytearray(image.bits().asarray(height * width * 4))
-            
-            # Reshape to (height, width, 4) - BGRA or RGBA depending on platform
-            img_array = np.frombuffer(img_bytes, dtype=np.uint8).reshape((height, width, 4))
-            
-            # Qt stores as BGRA on most platforms, convert to RGB
-            # img_array is now [B, G, R, A] or [R, G, B, A]
-            # OpenCV expects BGR, so we use the array directly if it's BGRA
-            img_bgr = img_array[:, :, :3]  # Drop alpha channel
-            
-        else:
-            # Convert to RGB32 first for other formats
-            image_rgb = image.convertToFormat(QImage.Format_RGB32)
-            img_bytes = bytearray(image_rgb.bits().asarray(height * width * 4))
-            img_array = np.frombuffer(img_bytes, dtype=np.uint8).reshape((height, width, 4))
-            img_bgr = img_array[:, :, :3]
-        
-        print(f"CONTOUR_INFO: QImage converted to numpy array {img_array.shape}", flush=True)
-        sys.stdout.flush()
-        
-        # Convert RGB to BGR for OpenCV (if needed - Qt uses BGRA on Windows)
-        # Check if we need to swap channels by looking at a known color
-        img_bgr = cv2.cvtColor(img_array[:, :, :3], cv2.COLOR_RGB2BGR)
+        try:
+            # Convert QImage to BGR numpy array (OpenCV format)
+            img_bgr, _ = qimage_to_bgr(image)
+            print(f"CONTOUR_INFO: QImage converted to numpy array {img_bgr.shape}", flush=True)
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"CONTOUR_ERROR: QImage conversion failed: {e}", flush=True)
+            import traceback
+            print(f"CONTOUR_ERROR: {traceback.format_exc()}", flush=True)
+            sys.stdout.flush()
+            return []
         
         # Convert to grayscale
         gray_full = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -435,7 +420,8 @@ class UI2CodeDetect:
                 0
             )
         
-        print(f"CONTOUR_INFO: Final element count: {len(elements)}", flush=True)
+        elapsed = time.time() - start_time
+        print(f"CONTOUR_INFO: Completed in {elapsed:.3f}s, final count: {len(elements)}", flush=True)
         sys.stdout.flush()
         
         return elements
@@ -663,8 +649,12 @@ class UI2CodeDetect:
         try:
             import cv2
         except ImportError:
-            print("COLOR_WARNING: OpenCV not available, skipping color detection", flush=True)
+            print("COLOR_ERROR: OpenCV not available", flush=True)
+            sys.stdout.flush()
             return []
+        
+        # Use centralized QImage conversion
+        from engine.image_utils import qimage_to_bgr
         
         elements: List[UIElement] = []
         width = image.width()
@@ -678,17 +668,17 @@ class UI2CodeDetect:
         
         start_time = time.time()
         
-        # Convert QImage to numpy (same as contour detection)
-        fmt = image.format()
-        if fmt in (QImage.Format_RGB32, QImage.Format_ARGB32, QImage.Format_ARGB32_Premultiplied):
-            img_bytes = bytearray(image.bits().asarray(height * width * 4))
-            img_array = np.frombuffer(img_bytes, dtype=np.uint8).reshape((height, width, 4))
-            img_bgr = img_array[:, :, :3]
-        else:
-            image_rgb = image.convertToFormat(QImage.Format_RGB32)
-            img_bytes = bytearray(image_rgb.bits().asarray(height * width * 4))
-            img_array = np.frombuffer(img_bytes, dtype=np.uint8).reshape((height, width, 4))
-            img_bgr = img_array[:, :, :3]
+        try:
+            # Convert QImage to BGR numpy array
+            img_bgr, _ = qimage_to_bgr(image)
+            print(f"COLOR_INFO: QImage converted to numpy array {img_bgr.shape}", flush=True)
+            sys.stdout.flush()
+        except Exception as e:
+            print(f"COLOR_ERROR: QImage conversion failed: {e}", flush=True)
+            import traceback
+            print(f"COLOR_ERROR: {traceback.format_exc()}", flush=True)
+            sys.stdout.flush()
+            return []
         
         # Convert to grayscale for edge detection
         gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)

@@ -94,15 +94,39 @@ function Test-RequiredImports {
     $allOk = $true
     
     foreach ($import in $imports) {
-        $testCode = "try: import " + $import.Name + "; print('OK'); except ImportError as e: print('FAIL: ' + str(e))"
-        $result = & $PyLauncher $Version -c $testCode 2>&1
-        
-        if ($result -match "OK") {
-            Write-Log "$($import.Name) (from $($import.Package)) imported successfully" -Level "SUCCESS"
+        # Create a temporary Python script file for testing imports
+        # This avoids PowerShell string escaping issues with Python syntax
+        $tempScript = [System.IO.Path]::GetTempFileName()
+        try {
+            # Write valid Python code to temp file
+            @"
+import sys
+try:
+    __import__('$($import.Name)')
+    print('OK')
+    sys.exit(0)
+except ImportError as e:
+    print('FAIL: ' + str(e))
+    sys.exit(1)
+"@ | Out-File -FilePath $tempScript -Encoding UTF8 -NoNewline
+            
+            # Execute the Python script
+            $result = & $PyLauncher $Version $tempScript 2>&1
+            $exitCode = $LASTEXITCODE
+            
+            if ($exitCode -eq 0 -and $result -match "OK") {
+                Write-Log "$($import.Name) (from $($import.Package)) imported successfully" -Level "SUCCESS"
+            }
+            else {
+                Write-Log "$($import.Name) (from $($import.Package)) import failed: $result" -Level "ERROR"
+                $allOk = $false
+            }
         }
-        else {
-            Write-Log "$($import.Name) (from $($import.Package)) import failed: $result" -Level "ERROR"
-            $allOk = $false
+        finally {
+            # Clean up temp file
+            if (Test-Path $tempScript) {
+                Remove-Item $tempScript -Force
+            }
         }
     }
     

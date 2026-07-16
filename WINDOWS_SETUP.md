@@ -8,6 +8,76 @@
 
 ---
 
+## 🐍 Linux/Container Test Environment
+
+Voor ontwikkelaars die UI2Code willen testen op Linux of in containers:
+
+### Docker Build en Test
+
+```bash
+# Build de custom test environment
+cd /workspace/project/ui2code
+docker build -t ui2code-test:latest .
+
+# Run alle tests
+docker run --rm ui2code-test:latest
+
+# Run met interactieve shell
+docker run --rm -it ui2code-test:latest bash
+
+# Run GUI tests met Xvfb
+docker run --rm ui2code-test:latest xvfb-run -a python tools/test_gui.py
+```
+
+### Handmatige Installatie (Debian/Ubuntu)
+
+```bash
+# Installeer systeem dependencies
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+    libegl1 \
+    libgl1 \
+    libdbus-1-3 \
+    libfontconfig1 \
+    libxkbcommon-x11-0 \
+    libxcb-cursor0 \
+    libxcb-icccm4 \
+    libxcb-image0 \
+    libxcb-keysyms1 \
+    libxcb-randr0 \
+    libxcb-render-util0 \
+    libxcb-shape0 \
+    libxcb-xfixes0 \
+    libxcb-xinerama0 \
+    libxkbcommon0 \
+    libglib2.0-0 \
+    libglx0 \
+    libopengl0 \
+    libglx-mesa0 \
+    xvfb \
+    xauth
+
+# Installeer Python dependencies
+pip install -r requirements.txt
+
+# Test installatie
+python tools/test_import.py
+QT_QPA_PLATFORM=offscreen python tools/test_gui.py
+xvfb-run -a python tools/test_gui.py
+```
+
+### Ontbrekende Bibliotheken Controleren
+
+```bash
+# Controleer op ontbrekende libraries
+python -c "from PySide6 import QtWidgets; import os; print(os.path.dirname(QtWidgets.__file__))"
+ldd $(python -c "from PySide6 import QtWidgets; import os; print(os.path.dirname(QtWidgets.__file__))")/QtWidgets.abi3.so | grep "not found"
+```
+
+**Zie `DOCKER_TEST_ENV.md` voor uitgebreide Docker documentatie.**
+
+---
+
 ## 🚀 Snelle Start (Aanbevolen)
 
 ### Methode 1: start.bat (Eenvoudigst)

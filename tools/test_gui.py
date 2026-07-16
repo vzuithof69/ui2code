@@ -2,6 +2,14 @@
 
 Headless test script to verify the PySide6 GUI can be created and basic operations work.
 Uses QT_QPA_PLATFORM=offscreen for headless testing.
+
+This test:
+- Creates a QApplication instance
+- Creates the UI2CodeSuperEngineWindow
+- Verifies all widgets are present
+- Tests zoom functionality
+- Properly closes the window
+- Cleans up resources
 """
 
 import sys
@@ -27,6 +35,7 @@ def test_gui_creation() -> bool:
         # First check if Qt is available
         try:
             from PySide6.QtWidgets import QApplication
+            from PySide6.QtCore import QTimer
         except ImportError as qt_err:
             print(f"  ⚠ Qt libraries not available: {qt_err}")
             print("  Skipping GUI tests (system libraries missing)")
@@ -42,6 +51,7 @@ def test_gui_creation() -> bool:
         if app is None:
             app = QApplication(sys.argv)
         print("  ✓ QApplication created")
+        print(f"  ✓ Application name: {app.applicationName()}")
 
         # Test ElementEditor
         print("\nTesting ElementEditor...")
@@ -65,6 +75,7 @@ def test_gui_creation() -> bool:
         retrieved_data = editor.get_element_data()
         assert retrieved_data["id"] == test_data["id"], "ID mismatch"
         assert retrieved_data["name"] == test_data["name"], "Name mismatch"
+        assert retrieved_data["color_hex"] == test_data["color_hex"], "HEX color mismatch"
         print("  ✓ ElementEditor data operations work")
 
         # Test PreviewArea
@@ -137,8 +148,36 @@ def test_gui_creation() -> bool:
         print(f"  ✓ All tabs present: {', '.join(tab_names)}")
 
         # Show window (in offscreen mode)
+        print("\nShowing window...")
         window.show()
         print("  ✓ Window shown successfully")
+
+        # Verify window is visible
+        assert window.isVisible(), "Window should be visible"
+        print("  ✓ Window is visible")
+
+        # Test button clicks (placeholder actions)
+        print("\nTesting button clicks...")
+        window.btn_detect_ui.click()
+        print("  ✓ Button clicks work (placeholder actions)")
+
+        # Process events to ensure everything is rendered
+        app.processEvents()
+        print("  ✓ Events processed")
+
+        # Close window
+        print("\nClosing window...")
+        window.close()
+        print("  ✓ Window closed")
+
+        # Verify window is closed
+        assert not window.isVisible(), "Window should be closed"
+        print("  ✓ Window is no longer visible")
+
+        # Cleanup
+        print("\nCleaning up...")
+        app.quit()
+        print("  ✓ QApplication quit")
 
         print("-" * 40)
         print("All GUI tests passed!")

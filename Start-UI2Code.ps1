@@ -94,14 +94,14 @@ function Test-RequiredImports {
     $allOk = $true
     
     foreach ($import in $imports) {
-        $testCode = "try: import $($import.Name); print('OK'); except ImportError as e: print(f'FAIL: {e}')"
+        $testCode = "try: import " + $import.Name + "; print('OK'); except ImportError as e: print('FAIL: ' + str(e))"
         $result = & $PyLauncher $Version -c $testCode 2>&1
         
         if ($result -match "OK") {
-            Write-Log "✓ $($import.Name) (from $($import.Package)) imported successfully" -Level "SUCCESS"
+            Write-Log "$($import.Name) (from $($import.Package)) imported successfully" -Level "SUCCESS"
         }
         else {
-            Write-Log "✗ $($import.Name) (from $($import.Package)) import failed: $result" -Level "ERROR"
+            Write-Log "$($import.Name) (from $($import.Package)) import failed: $result" -Level "ERROR"
             $allOk = $false
         }
     }

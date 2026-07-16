@@ -277,30 +277,315 @@ class UI2CodeDetect:
         self._element_counter += 1
         return f"elem_{source}_{self._element_counter:04d}"
 
-    def _detect_contours(self, image: "QImage") -> List[UIElement]:
-        """Detect UI elements using contour detection (existing method).
+    def _detect_contours(
+        self,
+        image: "QImage",
+        max_candidates_per_tile: int = 300,
+        tile_size: int = 1024,
+        tile_overlap: int = 50
+    ) -> List[UIElement]:
+        """Detect UI elements using OpenCV with tiled processing.
         
-        Optimized with sampling for large images.
+        Uses OpenCV for fast contour detection and tiling for memory efficiency.
+        Processes large images in overlapping tiles to avoid memory issues.
+        
+        Args:
+            image: QImage to process.
+            max_candidates_per_tile: Maximum candidates per tile.
+            tile_size: Size of each tile in pixels.
+            tile_overlap: Overlap between tiles in pixels.
+        
+        Returns:
+            List of detected UI elements.
         """
         import sys
+        import numpy as np
+        
+        # Try to import OpenCV
+        try:
+            import cv2
+            _OPENCV_AVAILABLE = True
+        except ImportError:
+            _OPENCV_AVAILABLE = False
+            print("CONTOUR_WARNING: OpenCV not available, falling back to basic detection", flush=True)
+            return self._detect_contours_basic(image)
+        
         elements: List[UIElement] = []
         width = image.width()
         height = image.height()
         
-        print(f"CONTOUR_DEBUG: Image size {width}x{height}", flush=True)
+        print(f"CONTOUR_INFO: Image size {width}x{height}, tile_size={tile_size}, overlap={tile_overlap}", flush=True)
         sys.stdout.flush()
         
-        # Use sampling for large images
+        # Convert QImage to numpy array (fast, single call)
+        ptr = image.bits()
+        ptr.setsize(image.byteCount())
+        
+        # QImage.Format_RGB32 or Format_ARGB32
+        img_array = np.array(ptr).reshape((height, width, 4))
+        
+        # Convert to BGR for OpenCV (drop alpha channel)
+        img_bgr = img_array[:, :, :3]  # RGB -> will convert to BGR for cv2
+        
+        print(f"CONTOUR_INFO: QImage converted to numpy array {img_array.shape}", flush=True)
+        sys.stdout.flush()
+        
+        # Convert RGB to BGR for OpenCV
+        img_bgr = cv2.cvtColor(img_array[:, :, :3], cv2.COLOR_RGB2BGR)
+        
+        # Convert to grayscale
+        gray_full = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
+        
+        print(f"CONTOUR_INFO: Grayscale created", flush=True)
+        sys.stdout.flush()
+        
+        # Determine if tiling is needed
+        use_tiles = width > tile_size or height > tile_size
+        
+        if use_tiles:
+            print(f"CONTOUR_INFO: Using tiled processing", flush=True)
+            sys.stdout.flush()
+            
+            # Process image in overlapping tiles
+            all_tile_elements: List[Tuple[int, int, List[UIElement]]] = []
+            
+            y_tiles = []
+            y = 0
+            while y < height:
+                tile_h = min(tile_size, height - y)
+                y_tiles.append((y, tile_h))
+                y += tile_size - tile_overlap if y + tile_size < height else tile_size
+            
+            x_tiles = []
+            x = 0
+            while x < width:
+                tile_w = min(tile_size, width - x)
+                x_tiles.append((x, tile_w))
+                x += tile_size - tile_overlap if x + tile_size < width else tile_size
+            
+            print(f"CONTOUR_INFO: Grid {len(x_tiles)}x{len(y_tiles)} tiles", flush=True)
+            sys.stdout.flush()
+            
+            total_candidates = 0
+            tile_count = 0
+            
+            for tile_idx, (tile_x, tile_w) in enumerate(x_tiles):
+                for tile_y_idx, (tile_y, tile_h) in enumerate(y_tiles):
+                    tile_count += 1
+                    
+                    # Extract tile
+                    tile_gray = gray_full[tile_y:tile_y+tile_h, tile_x:tile_x+tile_w]
+                    
+                    # Process tile
+                    tile_elements = self._process_contour_tile(
+                        tile_gray,
+                        tile_x,
+                        tile_y,
+                        img_bgr[tile_y:tile_y+tile_h, tile_x:tile_x+tile_w],
+                        max_candidates_per_tile,
+                        tile_count
+                    )
+                    
+                    if tile_elements:
+                        all_tile_elements.append((tile_x, tile_y, tile_elements))
+                        total_candidates += len(tile_elements)
+                        print(f"CONTOUR_TILE_{tile_count}: {len(tile_elements)} candidates (total={total_candidates})", flush=True)
+                    else:
+                        print(f"CONTOUR_TILE_{tile_count}: 0 candidates", flush=True)
+                    sys.stdout.flush()
+            
+            # Merge and deduplicate tile results
+            print(f"CONTOUR_INFO: Merging {len(all_tile_elements)} tile results", flush=True)
+            sys.stdout.flush()
+            
+            elements = self._merge_tile_elements(all_tile_elements, width, height)
+            
+            print(f"CONTOUR_INFO: After merge: {len(elements)} unique elements", flush=True)
+            sys.stdout.flush()
+            
+        else:
+            # Process full image at once
+            print(f"CONTOUR_INFO: Processing full image without tiling", flush=True)
+            sys.stdout.flush()
+            
+            elements = self._process_contour_tile(
+                gray_full,
+                0,
+                0,
+                img_bgr,
+                max_candidates_per_tile * 4,  # Higher limit for full image
+                0
+            )
+        
+        print(f"CONTOUR_INFO: Final element count: {len(elements)}", flush=True)
+        sys.stdout.flush()
+        
+        return elements
+    
+    def _process_contour_tile(
+        self,
+        gray: "np.ndarray",
+        offset_x: int,
+        offset_y: int,
+        img_bgr: "np.ndarray",
+        max_candidates: int,
+        tile_id: int
+    ) -> List[UIElement]:
+        """Process a single tile for contour detection.
+        
+        Args:
+            gray: Grayscale numpy array of tile.
+            offset_x: X offset in original image.
+            offset_y: Y offset in original image.
+            img_bgr: BGR numpy array of tile.
+            max_candidates: Maximum candidates to return.
+            tile_id: Tile identifier for logging.
+        
+        Returns:
+            List of UI elements detected in tile.
+        """
+        import cv2
+        import numpy as np
+        import sys
+        
+        start_time = time.time()
+        
+        tile_h, tile_w = gray.shape
+        
+        # Apply Canny edge detection
+        edges = cv2.Canny(gray, 50, 150)
+        
+        # Find contours
+        contours, _ = cv2.findContours(
+            edges,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        
+        print(f"CONTOUR_TILE_{tile_id}: Found {len(contours)} raw contours", flush=True)
+        sys.stdout.flush()
+        
+        elements: List[UIElement] = []
+        
+        for idx, contour in enumerate(contours):
+            if len(elements) >= max_candidates:
+                print(f"CONTOUR_TILE_{tile_id}: Hit max_candidates limit ({max_candidates})", flush=True)
+                sys.stdout.flush()
+                break
+            
+            # Get bounding rectangle
+            x, y, w, h = cv2.boundingRect(contour)
+            
+            # Filter small contours
+            if w < 10 or h < 10:
+                continue
+            
+            # Filter very large contours (likely background)
+            if w > tile_w * 0.95 and h > tile_h * 0.95:
+                continue
+            
+            # Get average color from BGR image
+            tile_region = img_bgr[y:y+h, x:x+w]
+            if tile_region.size > 0:
+                avg_color = np.mean(tile_region, axis=(0, 1))
+                color_rgb = (int(avg_color[2]), int(avg_color[1]), int(avg_color[0]))  # BGR -> RGB
+            else:
+                color_rgb = (0, 0, 0)
+            
+            color_hex = UIElement._rgb_to_hex(color_rgb)
+            
+            # Calculate confidence based on rectangularity
+            area = cv2.contourArea(contour)
+            rect_area = w * h
+            rectangularity = area / rect_area if rect_area > 0 else 0
+            confidence = min(0.95, 0.5 + rectangularity * 0.3)
+            
+            # Create element with global coordinates
+            element = UIElement(
+                id=self._generate_element_id("contour"),
+                name=f"Tile{tile_id}_Elem_{len(elements):04d}",
+                element_type="unknown",
+                category="general",
+                color_rgb=color_rgb,
+                color_hex=color_hex,
+                x=offset_x + x,
+                y=offset_y + y,
+                width=w,
+                height=h,
+                confidence=confidence,
+                source="contour"
+            )
+            elements.append(element)
+        
+        elapsed = time.time() - start_time
+        print(f"CONTOUR_TILE_{tile_id}: Processed in {elapsed:.3f}s, returning {len(elements)} elements", flush=True)
+        sys.stdout.flush()
+        
+        return elements
+    
+    def _merge_tile_elements(
+        self,
+        tile_elements: List[Tuple[int, int, List[UIElement]]],
+        image_width: int,
+        image_height: int
+    ) -> List[UIElement]:
+        """Merge and deduplicate elements from overlapping tiles.
+        
+        Args:
+            tile_elements: List of (offset_x, offset_y, elements) tuples.
+            image_width: Full image width.
+            image_height: Full image height.
+        
+        Returns:
+            Merged and deduplicated element list.
+        """
+        import sys
+        
+        print(f"CONTOUR_MERGE: Starting merge of {len(tile_elements)} tile results", flush=True)
+        sys.stdout.flush()
+        
+        # Flatten all elements
+        all_elements: List[UIElement] = []
+        for _, _, elements in tile_elements:
+            all_elements.extend(elements)
+        
+        print(f"CONTOUR_MERGE: Total candidates before dedup: {len(all_elements)}", flush=True)
+        sys.stdout.flush()
+        
+        # Use IoU-based deduplication
+        deduplicated = self._remove_duplicates_iou_optimized(all_elements, 0.7)
+        
+        print(f"CONTOUR_MERGE: After IoU dedup: {len(deduplicated)} elements", flush=True)
+        sys.stdout.flush()
+        
+        # Filter background-sized elements
+        image_area = image_width * image_height
+        filtered = [
+            e for e in deduplicated
+            if (e.width * e.height) / image_area <= 0.9
+        ]
+        
+        print(f"CONTOUR_MERGE: After background filter: {len(filtered)} elements", flush=True)
+        sys.stdout.flush()
+        
+        return filtered
+    
+    def _detect_contours_basic(self, image: "QImage") -> List[UIElement]:
+        """Fallback contour detection without OpenCV.
+        
+        Uses sampling for performance.
+        """
+        import sys
+        
+        elements: List[UIElement] = []
+        width = image.width()
+        height = image.height()
+        
+        # Use aggressive sampling for large images
         sample_rate = max(1, min(width, height) // 800)
-        print(f"CONTOUR_DEBUG: Sample rate {sample_rate}", flush=True)
-        sys.stdout.flush()
         
-        # Create grayscale buffer with sampling
         sampled_w = (width - 1) // sample_rate + 1
         sampled_h = (height - 1) // sample_rate + 1
-        
-        print(f"CONTOUR_DEBUG: Creating gray buffer {sampled_w}x{sampled_h}", flush=True)
-        sys.stdout.flush()
         
         gray = [[0] * sampled_w for _ in range(sampled_h)]
         for y in range(0, height, sample_rate):
@@ -311,23 +596,11 @@ class UI2CodeDetect:
                     (color.red() + color.green() + color.blue()) / 3
                 )
         
-        print(f"CONTOUR_DEBUG: Gray buffer created", flush=True)
-        sys.stdout.flush()
-        
-        # Find edges with sampling
         edges = self._find_edges(gray, sampled_w, sampled_h)
-        
-        print(f"CONTOUR_DEBUG: Finding rectangular regions", flush=True)
-        sys.stdout.flush()
-        
         regions = self._find_rectangular_regions(edges, sampled_w, sampled_h)
-        
-        print(f"CONTOUR_DEBUG: Found {len(regions)} regions", flush=True)
-        sys.stdout.flush()
         
         for idx, region in enumerate(regions):
             x, y, w, h = region
-            # Scale back to original coordinates
             x *= sample_rate
             y *= sample_rate
             w = max(w * sample_rate, sample_rate)
@@ -335,9 +608,7 @@ class UI2CodeDetect:
             
             color_rgb = self._get_region_color(image, x, y, w, h)
             color_hex = UIElement._rgb_to_hex(color_rgb)
-            
-            # Calculate confidence based on rectangularity and contrast
-            confidence = self._calculate_confidence(image, x, y, w, h, gray, edges)
+            confidence = 0.5
             
             element = UIElement(
                 id=self._generate_element_id("contour"),
@@ -354,9 +625,6 @@ class UI2CodeDetect:
                 source="contour"
             )
             elements.append(element)
-        
-        print(f"CONTOUR_DEBUG: Returning {len(elements)} elements", flush=True)
-        sys.stdout.flush()
         
         return elements
 

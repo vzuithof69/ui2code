@@ -924,11 +924,26 @@ if _QT_AVAILABLE:
             # Log error
             _logger.error("Detection timed out - thread cancelled")
             
+            # Write to latest-error.log
+            try:
+                with open('logs/latest-error.log', 'a') as f:
+                    f.write(f"\n{'='*60}\n")
+                    f.write(f"DETECTION TIMEOUT - {datetime.now().isoformat()}\n")
+                    f.write(f"Image: {self._current_image_path}\n")
+                    f.write(f"Timeout: {self._watchdog_timeout}s\n")
+                    f.write(f"{'='*60}\n")
+            except Exception as log_err:
+                _logger.error(f"Failed to write error log: {log_err}")
+            
             QMessageBox.critical(
                 self,
                 "Detectie timeout",
-                f"De detectie duurde te langer dan {self._watchdog_timeout} seconden.\n\n"
-                f"De detectie is afgebroken. Probeer een kleinere afbeelding."
+                f"De detectie is afgebroken na {self._watchdog_timeout} seconden.\n\n"
+                f"Mogelijke oorzaken:\n"
+                f"- Afbeelding te groot of complex\n"
+                f"- Onvoldoende geheugen\n"
+                f"- OpenCV niet geïnstalleerd\n\n"
+                f"Controleer logs/latest-error.log voor technische details."
             )
         
         def _on_detection_started(self) -> None:

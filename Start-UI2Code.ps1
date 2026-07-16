@@ -16,6 +16,65 @@ $RequirementsFile = Join-Path $ProjectRoot "requirements.txt"
 $PythonModule = "ui.ui2code_super_engine"
 
 # ============================================================================
+# PYTHON LAUNCHER SETUP
+# ============================================================================
+# Use py.exe launcher with proper argument separation
+# Never store "py -3.12" as a single string - this breaks in PowerShell
+try {
+    $PyLauncher = (Get-Command py.exe -ErrorAction Stop).Source
+    Write-Host "Found py.exe launcher: $PyLauncher" -ForegroundColor Green
+}
+catch {
+    Write-Host "ERROR: py.exe not found. Please install Python from https://www.python.org/downloads/" -ForegroundColor Red
+    Write-Host "Ensure 'Python Launcher' is selected during installation." -ForegroundColor Yellow
+    exit 1
+}
+
+function Test-PythonAvailable {
+    param([string]$Version = "-3.12")
+    
+    $exitCode = 0
+    & $PyLauncher $Version --version 2>&1 | Out-Null
+    $exitCode = $LASTEXITCODE
+    
+    return $exitCode -eq 0
+}
+
+function Test-PipAvailable {
+    param([string]$Version = "-3.12")
+    
+    $exitCode = 0
+    & $PyLauncher $Version -m pip --version 2>&1 | Out-Null
+    $exitCode = $LASTEXITCODE
+    
+    return $exitCode -eq 0
+}
+
+function Install-Requirements {
+    param([string]$Version = "-3.12", [string]$RequirementsFile)
+    
+    Write-Log "Installing dependencies from requirements.txt..."
+    & $PyLauncher $Version -m pip install -r $RequirementsFile --quiet
+    $exitCode = $LASTEXITCODE
+    
+    if ($exitCode -ne 0) {
+        Write-Error-Log "pip install failed with exit code $exitCode"
+        return $false
+    }
+    return $true
+}
+
+function Start-UI2CodeModule {
+    param([string]$Version = "-3.12", [string]$ModuleName)
+    
+    Write-Log "Starting GUI module: $ModuleName"
+    & $PyLauncher $Version -m $ModuleName
+    $exitCode = $LASTEXITCODE
+    
+    return $exitCode
+}
+
+# ============================================================================
 # LOGGING SETUP
 # ============================================================================
 $Timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -73,21 +132,10 @@ try {
     
     # Check if Python 3.12 is available via py launcher
     Write-Log "Checking for Python 3.12..."
-    $pythonExe = $null
+    $pythonVersion = "-3.12"
     
-    try {
-        $pyOutput = & py -3.12 --version 2>&1
-        if ($pyOutput -match "Python 3\.12") {
-            $pythonExe = "py -3.12"
-            Write-Log "Found Python 3.12: $pyOutput" -Level "SUCCESS"
-        }
-    }
-    catch {
-        Write-Log "Python 3.12 not found via py launcher" -Level "WARNING"
-    }
-    
-    if (!$pythonExe) {
-        Write-Error-Log "Python 3.12 is not installed or not accessible via 'py -3.12'"
+    if (!(Test-PythonAvailable -Version $pythonVersion)) {
+        Write-Error-Log "Python 3.12 is not installed or not accessible via py.exe"
         Write-Host "`n=== FOUT: Python 3.12 niet gevonden ===" -ForegroundColor Red
         Write-Host "Installeer Python 3.12 van https://www.python.org/downloads/" -ForegroundColor Yellow
         Write-Host "Of gebruik: py -3.12 --version om te controleren" -ForegroundColor Yellow
@@ -96,6 +144,9 @@ try {
         exit 1
     }
     
+    $pyVersionOutput = & $PyLauncher $pythonVersion --version 2>&1
+    Write-Log "Found Python 3.12: $pyVersionOutput" -Level "SUCCESS"
+    
     # Check if requirements.txt exists
     if (!(Test-Path $RequirementsFile)) {
         Write-Error-Log "requirements.txt niet gevonden: $RequirementsFile"
@@ -103,32 +154,46 @@ try {
         exit 1
     }
     
+    # Check if pip is available
+    Write-Log "Checking for pip availability..."
+    if (!(Test-PipAvailable -Version $pythonVersion)) {
+        Write-Error-Log "pip is not available for Python 3.12"
+        Write-Host "`n=== FOUT: pip niet beschikbaar ===" -ForegroundColor Red
+        Write-Host "Probeer: py -3.12 -m ensurepip" -ForegroundColor Yellow
+        Write-Host "`nDruk op een toets om af te sluiten..."
+        if (!$NoPause) { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
+        exit 1
+    }
+    
+    $pipVersionOutput = & $PyLauncher $pythonVersion -m pip --version 2>&1
+    Write-Log "Found pip: $pipVersionOutput" -Level "SUCCESS"
+    
     # Install requirements if needed
     Write-Log "Checking dependencies..."
-    try {
-        $checkOutput = & $pythonExe -c "import PySide6; print('PySide6 OK')" 2>&1
-        if ($checkOutput -match "OK") {
-            Write-Log "Dependencies already installed" -Level "SUCCESS"
-        }
-        else {
-            Write-Log "Installing dependencies from requirements.txt..."
-            & $pythonExe -m pip install -r $RequirementsFile --quiet
-            Write-Log "Dependencies installed" -Level "SUCCESS"
-        }
+    $checkOutput = & $PyLauncher $pythonVersion -c "import PySide6; print('OK')" 2>&1
+    $checkExitCode = $LASTEXITCODE
+    
+    if ($checkExitCode -eq 0 -and $checkOutput -match "OK") {
+        Write-Log "Dependencies already installed" -Level "SUCCESS"
     }
-    catch {
-        Write-Log "Installing dependencies..."
-        & $pythonExe -m pip install -r $RequirementsFile --quiet
+    else {
+        $installResult = Install-Requirements -Version $pythonVersion -RequirementsFile $RequirementsFile
+        if (!$installResult) {
+            Write-Host "`n=== FOUT: Installatie van dependencies mislukt ===" -ForegroundColor Red
+            Write-Host "Zie log file: $LogPath" -ForegroundColor Yellow
+            Write-Host "`nDruk op een toets om af te sluiten..."
+            if (!$NoPause) { $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown") }
+            exit 1
+        }
         Write-Log "Dependencies installed" -Level "SUCCESS"
     }
     
     # Start GUI
     Write-Log "`n=== Starting GUI ===" -Level "SUCCESS"
-    Write-Log "Command: $pythonExe -m $PythonModule"
+    Write-Log "Command: $PyLauncher $pythonVersion -m $PythonModule"
     Write-Log "Log file: $LogPath"
     
-    & $pythonExe -m $PythonModule
-    $exitCode = $LASTEXITCODE
+    $exitCode = Start-UI2CodeModule -Version $pythonVersion -ModuleName $PythonModule
     
     Write-Log "=== UI2Code Script Voltooid (exit code: $exitCode) ==="
     

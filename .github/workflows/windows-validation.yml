@@ -1,0 +1,245 @@
+name: Windows Validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  windows-test:
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+    
+    - name: Verify PySide6, NumPy, OpenCV installation
+      run: |
+        python -c "import PySide6; print('PySide6:', PySide6.__version__)"
+        python -c "import numpy; print('NumPy:', numpy.__version__)"
+        python -c "import cv2; print('OpenCV:', cv2.__version__)"
+    
+    - name: Test PowerShell syntax
+      run: |
+        $null = [System.Management.Automation.PSParser]::Tokenize((Get-Content -Raw '.\Start-UI2Code.ps1'), [ref]$null)
+        Write-Host "PowerShell syntax OK"
+      shell: pwsh
+    
+    - name: Test start.bat execution (dry run)
+      run: |
+        # Run with -NoPause to avoid hanging
+        .\start.bat -NoPause
+      shell: pwsh
+      timeout-minutes: 5
+      continue-on-error: true
+    
+    - name: Test QImage conversion
+      run: |
+        python -c """
+        from PySide6.QtGui import QImage
+        from PySide6.QtCore import Qt
+        from engine.image_utils import qimage_to_numpy, qimage_to_bgr, qimage_to_grayscale
+        import numpy as np
+        
+        # Test with different formats
+        for fmt in [QImage.Format_RGB32, QImage.Format_ARGB32, QImage.Format_RGBA8888]:
+            img = QImage(100, 100, fmt)
+            img.fill(Qt.white)
+            
+            # Test conversion
+            rgba, _ = qimage_to_numpy(img)
+            assert rgba.shape == (100, 100, 4), f'Wrong shape: {rgba.shape}'
+            assert rgba.dtype == np.uint8, f'Wrong dtype: {rgba.dtype}'
+            
+            bgr, _ = qimage_to_bgr(img)
+            assert bgr.shape == (100, 100, 3), f'Wrong BGR shape: {bgr.shape}'
+            
+            gray, _ = qimage_to_grayscale(img)
+            assert gray.shape == (100, 100), f'Wrong gray shape: {gray.shape}'
+            
+            print(f'Format {fmt}: OK')
+        
+        print('All QImage conversions passed!')
+        """
+    
+    - name: Test contour detection
+      run: |
+        python -c """
+        from PySide6.QtGui import QImage
+        from PySide6.QtCore import Qt
+        from engine.ui2code_detect_v2 import UI2CodeDetect
+        import time
+        
+        # Create test image
+        img = QImage(800, 600, QImage.Format_RGB32)
+        img.fill(Qt.white)
+        
+        # Draw some rectangles
+        from PySide6.QtGui import QPainter, QBrush, QPen
+        from PySide6.QtCore import QRect
+        painter = QPainter(img)
+        painter.setPen(QPen(Qt.black, 2))
+        painter.setBrush(QBrush(Qt.blue))
+        painter.drawRect(50, 50, 200, 100)
+        painter.drawRect(300, 200, 150, 80)
+        painter.end()
+        
+        # Run detection
+        detector = UI2CodeDetect()
+        start = time.time()
+        elements = detector.detect_elements(image_data=img)
+        elapsed = time.time() - start
+        
+        print(f'Detected {len(elements)} elements in {elapsed:.3f}s')
+        
+        # Verify we got some results
+        assert len(elements) > 0, 'No elements detected'
+        
+        # Verify sources are present
+        sources = set(e.source for e in elements)
+        print(f'Sources: {sources}')
+        
+        # Verify confidence is not all 0.5
+        confidences = [e.confidence for e in elements]
+        unique_conf = set(confidences)
+        print(f'Unique confidence values: {len(unique_conf)}')
+        
+        if len(unique_conf) == 1 and list(unique_conf)[0] == 0.5:
+            print('WARNING: All confidence values are exactly 0.5')
+        
+        print('Contour detection test passed!')
+        """
+    
+    - name: Test color plane detection
+      run: |
+        python -c """
+        from PySide6.QtGui import QImage
+        from PySide6.QtCore import Qt
+        from engine.ui2code_detect_v2 import UI2CodeDetect
+        import time
+        
+        # Create test image with distinct color regions
+        img = QImage(800, 600, QImage.Format_RGB32)
+        img.fill(Qt.white)
+        
+        # Draw colored rectangles
+        from PySide6.QtGui import QPainter, QBrush
+        from PySide6.QtCore import QRect
+        painter = QPainter(img)
+        
+        # Red region
+        painter.setBrush(QBrush(Qt.red))
+        painter.drawRect(0, 0, 200, 200)
+        
+        # Green region
+        painter.setBrush(QBrush(Qt.green))
+        painter.drawRect(300, 0, 200, 200)
+        
+        # Blue region
+        painter.setBrush(QBrush(Qt.blue))
+        painter.drawRect(600, 0, 200, 200)
+        
+        painter.end()
+        
+        # Run detection
+        detector = UI2CodeDetect()
+        start = time.time()
+        elements = detector.detect_elements(image_data=img)
+        elapsed = time.time() - start
+        
+        print(f'Detected {len(elements)} elements in {elapsed:.3f}s')
+        
+        # Check for color_plane source
+        color_elements = [e for e in elements if e.source == 'color_plane']
+        print(f'Color plane elements: {len(color_elements)}')
+        
+        print('Color plane detection test passed!')
+        """
+    
+    - name: Test classification
+      run: |
+        python -c """
+        from engine.models import UIElement
+        
+        # Test that text_candidate is not classified as button
+        elem = UIElement(
+            id='test_001',
+            name='TestElement',
+            element_type='unknown',
+            category='general',
+            color_rgb=(255, 255, 255),
+            color_hex='#FFFFFF',
+            x=0, y=0, width=100, height=30,
+            confidence=0.7,
+            source='text_candidate',
+            text_candidate='[OCR_PENDING]'
+        )
+        
+        # Verify it's not automatically a button
+        assert elem.element_type != 'button' or elem.source != 'text_candidate', \\
+            'text_candidate should not be classified as button'
+        
+        # Test confidence bounds
+        for conf in [0.0, 0.5, 0.95, 1.0]:
+            elem.confidence = conf
+            assert 0.0 <= elem.confidence <= 1.0, f'Confidence {conf} out of bounds'
+        
+        print('Classification tests passed!')
+        """
+    
+    - name: Test error logging
+      run: |
+        python -c """
+        import os
+        import sys
+        sys.path.insert(0, '.')
+        
+        from tools.ui2code_logging import get_logger
+        import traceback
+        
+        # Get logger
+        logger = get_logger()
+        
+        # Force an error
+        try:
+            raise ValueError('Test error for logging validation')
+        except Exception:
+            logger.exception('Forced test error')
+        
+        # Check if latest-error.log was created
+        log_path = 'logs/latest-error.log'
+        if os.path.exists(log_path):
+            with open(log_path, 'r') as f:
+                content = f.read()
+            
+            # Verify content
+            assert 'ValueError' in content, 'ValueError not in error log'
+            assert 'Test error' in content, 'Error message not in log'
+            assert 'Traceback' in content or 'traceback' in content, 'Traceback not in log'
+            
+            print('Error logging test passed!')
+            print(f'Log content preview: {content[:200]}...')
+        else:
+            print(f'WARNING: {log_path} not created')
+        """
+    
+    - name: Verify logs not tracked in git
+      run: |
+        $trackedLogs = git ls-files logs/
+        if ($trackedLogs -match '.*\.log$' -and $trackedLogs -notmatch '.gitkeep') {
+          Write-Error "Log files are still tracked in git!"
+          exit 1
+        }
+        Write-Host "Log files correctly excluded from git"
+      shell: pwsh

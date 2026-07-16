@@ -7,6 +7,12 @@ import sys
 import os
 from typing import Optional, Dict, Any, List
 
+# Import logging first
+from tools.ui2code_logging import initialize_logging, get_logger
+
+# Initialize logging at module load
+_logger = None
+
 # Import engine classes first (no Qt dependency)
 from engine.ui2code_core import UI2CodeCore
 from engine.ui2code_detect import UI2CodeDetect
@@ -329,6 +335,10 @@ if _QT_AVAILABLE:
             self._current_image_path: Optional[str] = None
             self._elements: List[UIElement] = []
             
+            # Initialize logging
+            global _logger
+            _logger = initialize_logging()
+            
             # Initialize detection engine
             self.detector = UI2CodeDetect()
             
@@ -528,6 +538,10 @@ if _QT_AVAILABLE:
 
         def _on_choose_image(self) -> None:
             """Handle choose image button click."""
+            global _logger
+            if _logger is None:
+                _logger = get_logger()
+            
             file_path, _ = QFileDialog.getOpenFileName(
                 self,
                 "Kies afbeelding",
@@ -536,10 +550,13 @@ if _QT_AVAILABLE:
             )
 
             if file_path:
+                _logger.info(f"Afbeelding gekozen: {file_path}")
                 self._current_image_path = file_path
                 if self.preview_area.set_image(file_path):
+                    _logger.info("Afbeelding succesvol geladen in preview")
                     self._update_zoom_display()
                 else:
+                    _logger.error(f"Kan afbeelding niet laden: {file_path}")
                     QMessageBox.warning(
                         self,
                         "Fout",
@@ -586,7 +603,12 @@ if _QT_AVAILABLE:
 
         def _on_detect_ui(self) -> None:
             """Handle detect UI button click."""
+            global _logger
+            if _logger is None:
+                _logger = get_logger()
+            
             if not self._current_image_path:
+                _logger.warning("Detectie geprobeerd zonder geladen afbeelding")
                 QMessageBox.warning(
                     self,
                     "Geen afbeelding",
@@ -595,9 +617,31 @@ if _QT_AVAILABLE:
                 return
 
             try:
-                # Run detection
-                elements = self.detector.detect_elements(image_path=self._current_image_path)
-
+                # Log detectie start
+                _logger.info(f"Start detectie - afbeeldingspad: {self._current_image_path}")
+                
+                # Verify file exists
+                if not os.path.exists(self._current_image_path):
+                    _logger.error(f"Afbeeldingsbestand bestaat niet: {self._current_image_path}")
+                    raise FileNotFoundError(f"Image file not found: {self._current_image_path}")
+                
+                # Log image info
+                try:
+                    from PySide6.QtGui import QImage
+                    test_img = QImage(self._current_image_path)
+                    _logger.info(
+                        f"Afbeelding geladen: {test_img.width()}x{test_img.height()} pixels"
+                    )
+                except Exception as img_err:
+                    _logger.warning(f"Kon afbeeldingsinformatie niet lezen: {img_err}")
+                
+                # Run detection - pass image_path as image_data argument
+                _logger.info("Roep detect_elements() aan met image_data=image_path")
+                elements = self.detector.detect_elements(image_data=self._current_image_path)
+                
+                # Log resultaat
+                _logger.info(f"Detectie voltooid - {len(elements)} element(en) gedetecteerd")
+                
                 # Store elements
                 self._elements = elements
 
@@ -623,18 +667,21 @@ if _QT_AVAILABLE:
                     )
 
             except FileNotFoundError as e:
+                _logger.exception("Bestand niet gevonden tijdens detectie")
                 QMessageBox.critical(
                     self,
                     "Bestand niet gevonden",
                     f"Afbeelding niet gevonden:\n{e}"
                 )
             except ImportError as e:
+                _logger.exception("Import error tijdens detectie")
                 QMessageBox.critical(
                     self,
                     "Import error",
                     f"Qt libraries niet beschikbaar:\n{e}"
                 )
             except Exception as e:
+                _logger.exception("Onverwachte fout tijdens detectie")
                 QMessageBox.critical(
                     self,
                     "Detectiefout",

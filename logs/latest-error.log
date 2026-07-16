@@ -1,0 +1,9 @@
+Timestamp: 2026-07-16T14:15:47.252834
+Exception Type: TestException
+Exception Value: Test error for logging
+
+Traceback:
+Traceback (most recent call last):
+  File "/workspace/project/ui2code/tools/test_detection_logging.py", line 383, in test_latest_error_log_created
+    raise TestException("Test error for logging")
+TestException: Test error for logging

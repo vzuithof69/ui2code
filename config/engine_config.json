@@ -1,0 +1,26 @@
+{
+  "engine": {
+    "name": "UI2Code Engine",
+    "version": "0.1.0",
+    "description": "Configuration for UI2Code conversion engine"
+  },
+  "settings": {
+    "debug": false,
+    "log_level": "INFO",
+    "output_dir": "./output",
+    "temp_dir": "./.tmp"
+  },
+  "detection": {
+    "confidence_threshold": 0.7,
+    "min_element_size": 10
+  },
+  "layout": {
+    "default_framework": "html",
+    "supported_frameworks": ["html", "react", "vue", "angular"]
+  },
+  "export": {
+    "format": "py",
+    "include_comments": true,
+    "overwrite": false
+  }
+}

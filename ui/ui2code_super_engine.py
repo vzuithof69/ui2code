@@ -5,7 +5,7 @@ Main UI interface for the UI2Code conversion system.
 
 import sys
 import os
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # Import engine classes first (no Qt dependency)
 from engine.ui2code_core import UI2CodeCore
@@ -19,10 +19,11 @@ try:
         QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
         QPushButton, QLabel, QFileDialog, QScrollArea,
         QGroupBox, QFormLayout, QLineEdit, QSlider, QTabWidget,
-        QListWidget, QSizePolicy, QMessageBox, QApplication
+        QListWidget, QTableWidget, QTableWidgetItem, QAbstractItemView,
+        QSizePolicy, QMessageBox, QApplication, QHeaderView
     )
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QPixmap
+    from PySide6.QtGui import QPixmap, QColor, QBrush, QPainter
     _QT_AVAILABLE = True
 except ImportError:
     _QT_AVAILABLE = False
@@ -34,6 +35,8 @@ except ImportError:
 
 
 if _QT_AVAILABLE:
+    from engine.models import UIElement
+
     class ElementEditor(QGroupBox):
         """Element editor panel for editing UI element properties."""
 
@@ -44,7 +47,9 @@ if _QT_AVAILABLE:
                 parent: Parent widget.
             """
             super().__init__("Element Editor", parent)
+            self._current_element: Optional[UIElement] = None
             self._setup_ui()
+            self._setup_connections()
 
         def _setup_ui(self) -> None:
             """Set up the element editor UI."""
@@ -54,6 +59,8 @@ if _QT_AVAILABLE:
 
             # Create input fields
             self.id_edit = QLineEdit()
+            self.id_edit.setReadOnly(True)  # ID is not editable
+
             self.name_edit = QLineEdit()
             self.type_edit = QLineEdit()
             self.category_edit = QLineEdit()
@@ -63,6 +70,8 @@ if _QT_AVAILABLE:
             self.y_edit = QLineEdit()
             self.w_edit = QLineEdit()
             self.h_edit = QLineEdit()
+            self.confidence_edit = QLineEdit()
+            self.confidence_edit.setReadOnly(True)  # Confidence is not editable
 
             # Add fields to layout
             layout.addRow("ID:", self.id_edit)
@@ -75,8 +84,47 @@ if _QT_AVAILABLE:
             layout.addRow("Y:", self.y_edit)
             layout.addRow("W:", self.w_edit)
             layout.addRow("H:", self.h_edit)
+            layout.addRow("Confidence:", self.confidence_edit)
 
             self.setLayout(layout)
+
+        def _setup_connections(self) -> None:
+            """Set up signal/slot connections for editor fields."""
+            self.name_edit.editingFinished.connect(self._on_field_changed)
+            self.type_edit.editingFinished.connect(self._on_field_changed)
+            self.category_edit.editingFinished.connect(self._on_field_changed)
+            self.x_edit.editingFinished.connect(self._on_field_changed)
+            self.y_edit.editingFinished.connect(self._on_field_changed)
+            self.w_edit.editingFinished.connect(self._on_field_changed)
+            self.h_edit.editingFinished.connect(self._on_field_changed)
+            self.color_hex_edit.editingFinished.connect(self._on_color_changed)
+
+        def _on_field_changed(self) -> None:
+            """Handle field change and update current element."""
+            if self._current_element is None:
+                return
+
+            try:
+                self._current_element.name = self.name_edit.text()
+                self._current_element.element_type = self.type_edit.text()
+                self._current_element.category = self.category_edit.text()
+                self._current_element.x = int(self.x_edit.text() or 0)
+                self._current_element.y = int(self.y_edit.text() or 0)
+                self._current_element.width = int(self.w_edit.text() or 0)
+                self._current_element.height = int(self.h_edit.text() or 0)
+            except (ValueError, AttributeError):
+                pass  # Ignore invalid input
+
+        def _on_color_changed(self) -> None:
+            """Handle color hex change and update RGB."""
+            if self._current_element is None:
+                return
+
+            hex_color = self.color_hex_edit.text()
+            rgb = UIElement._hex_to_rgb(hex_color)
+            self._current_element.color_hex = hex_color
+            self._current_element.color_rgb = rgb
+            self.color_rgb_edit.setText(f"{rgb[0]},{rgb[1]},{rgb[2]}")
 
         def get_element_data(self) -> Dict[str, Any]:
             """Get current element data from editor fields.
@@ -113,6 +161,60 @@ if _QT_AVAILABLE:
             self.y_edit.setText(str(data.get("y", "")))
             self.w_edit.setText(str(data.get("w", "")))
             self.h_edit.setText(str(data.get("h", "")))
+
+        def set_element(self, element: Optional[UIElement]) -> None:
+            """Set the current element being edited.
+
+            Args:
+                element: UIElement to edit, or None to clear.
+            """
+            self._current_element = element
+
+            if element is None:
+                self.clear()
+                return
+
+            # Block signals during update
+            self.blockSignals(True)
+
+            self.id_edit.setText(element.id)
+            self.name_edit.setText(element.name)
+            self.type_edit.setText(element.element_type)
+            self.category_edit.setText(element.category)
+            self.color_rgb_edit.setText(f"{element.color_rgb[0]},{element.color_rgb[1]},{element.color_rgb[2]}")
+            self.color_hex_edit.setText(element.color_hex)
+            self.x_edit.setText(str(element.x))
+            self.y_edit.setText(str(element.y))
+            self.w_edit.setText(str(element.width))
+            self.h_edit.setText(str(element.height))
+            self.confidence_edit.setText(f"{element.confidence:.2f}")
+
+            self.blockSignals(False)
+
+        def clear(self) -> None:
+            """Clear all editor fields."""
+            self.blockSignals(True)
+            self.id_edit.clear()
+            self.name_edit.clear()
+            self.type_edit.clear()
+            self.category_edit.clear()
+            self.color_rgb_edit.clear()
+            self.color_hex_edit.clear()
+            self.x_edit.clear()
+            self.y_edit.clear()
+            self.w_edit.clear()
+            self.h_edit.clear()
+            self.confidence_edit.clear()
+            self._current_element = None
+            self.blockSignals(False)
+
+        def get_current_element(self) -> Optional[UIElement]:
+            """Get the current element being edited.
+
+            Returns:
+                Current UIElement or None.
+            """
+            return self._current_element
 
 
     class PreviewArea(QScrollArea):
@@ -351,7 +453,7 @@ if _QT_AVAILABLE:
 
             # Tabs
             self.tabs = QTabWidget()
-            self.tab_elements = QListWidget()
+            self.tab_elements = self._create_elements_table()
             self.tab_groups = QListWidget()
             self.tab_labels = QListWidget()
             self.tab_ocr_zones = QListWidget()
@@ -365,10 +467,48 @@ if _QT_AVAILABLE:
 
             return right_widget
 
+        def _create_elements_table(self) -> QTableWidget:
+            """Create the elements table widget.
+
+            Returns:
+                Configured QTableWidget for displaying elements.
+            """
+            table = QTableWidget()
+            table.setColumnCount(11)
+            table.setHorizontalHeaderLabels([
+                "ID", "Naam", "Type", "Categorie",
+                "X", "Y", "W", "H",
+                "Kleur HEX", "Confidence", "Source"
+            ])
+
+            # Set column widths
+            header = table.horizontalHeader()
+            header.setSectionResizeMode(0, QHeaderView.ResizeToContents)  # ID
+            header.setSectionResizeMode(1, QHeaderView.Stretch)  # Naam
+            header.setSectionResizeMode(2, QHeaderView.ResizeToContents)  # Type
+            header.setSectionResizeMode(3, QHeaderView.ResizeToContents)  # Categorie
+            header.setSectionResizeMode(4, QHeaderView.ResizeToContents)  # X
+            header.setSectionResizeMode(5, QHeaderView.ResizeToContents)  # Y
+            header.setSectionResizeMode(6, QHeaderView.ResizeToContents)  # W
+            header.setSectionResizeMode(7, QHeaderView.ResizeToContents)  # H
+            header.setSectionResizeMode(8, QHeaderView.ResizeToContents)  # Kleur
+            header.setSectionResizeMode(9, QHeaderView.ResizeToContents)  # Confidence
+            header.setSectionResizeMode(10, QHeaderView.ResizeToContents)  # Source
+
+            # Enable single row selection
+            table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            table.setSelectionMode(QAbstractItemView.SingleSelection)
+            table.setAlternatingRowColors(True)
+
+            # Make table read-only (no editing)
+            table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+
+            return table
+
         def _setup_connections(self) -> None:
             """Set up signal/slot connections."""
             self.btn_choose_image.clicked.connect(self._on_choose_image)
-            self.btn_detect_ui.clicked.connect(self._on_placeholder_action)
+            self.btn_detect_ui.clicked.connect(self._on_detect_ui)
             self.btn_ocr_labels.clicked.connect(self._on_placeholder_action)
             self.btn_auto_name.clicked.connect(self._on_placeholder_action)
             self.btn_export.clicked.connect(self._on_placeholder_action)
@@ -378,6 +518,12 @@ if _QT_AVAILABLE:
             self.btn_zoom_in.clicked.connect(self._on_zoom_in)
             self.btn_zoom_out.clicked.connect(self._on_zoom_out)
             self.zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
+
+            # Connect table selection to editor
+            self.tab_elements.itemSelectionChanged.connect(self._on_element_selected)
+
+            # Store detected elements
+            self._elements: List[UIElement] = []
 
         def _on_choose_image(self) -> None:
             """Handle choose image button click."""
@@ -436,6 +582,153 @@ if _QT_AVAILABLE:
             self.zoom_slider.setValue(zoom_percent)
             self.zoom_slider.blockSignals(False)
             self.zoom_label.setText(f"{zoom_percent}%")
+
+        def _on_detect_ui(self) -> None:
+            """Handle detect UI button click."""
+            if not self._current_image_path:
+                QMessageBox.warning(
+                    self,
+                    "Geen afbeelding",
+                    "Kies eerst een afbeelding voordat je UI-elementen detecteert."
+                )
+                return
+
+            try:
+                # Run detection
+                elements = self.detector.detect_elements(image_path=self._current_image_path)
+
+                # Store elements
+                self._elements = elements
+
+                # Update table
+                self._update_elements_table(elements)
+
+                # Clear editor
+                self.element_editor.clear()
+
+                # Show status
+                count = len(elements)
+                if count > 0:
+                    QMessageBox.information(
+                        self,
+                        "Detectie voltooid",
+                        f"{count} UI-element(eren) gedetecteerd."
+                    )
+                else:
+                    QMessageBox.information(
+                        self,
+                        "Geen elementen",
+                        "Geen UI-elementen gedetecteerd in deze afbeelding."
+                    )
+
+            except FileNotFoundError as e:
+                QMessageBox.critical(
+                    self,
+                    "Bestand niet gevonden",
+                    f"Afbeelding niet gevonden:\n{e}"
+                )
+            except ImportError as e:
+                QMessageBox.critical(
+                    self,
+                    "Import error",
+                    f"Qt libraries niet beschikbaar:\n{e}"
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "Detectiefout",
+                    f"Er is een fout opgetreden bij het detecteren:\n{str(e)}"
+                )
+
+        def _update_elements_table(self, elements: List[UIElement]) -> None:
+            """Update the elements table with detected elements.
+
+            Args:
+                elements: List of detected UI elements.
+            """
+            table = self.tab_elements
+            table.setRowCount(0)  # Clear existing rows
+
+            for elem in elements:
+                row = table.rowCount()
+                table.insertRow(row)
+
+                # ID
+                item = QTableWidgetItem(elem.id)
+                item.setData(Qt.UserRole, elem)  # Store element reference
+                table.setItem(row, 0, item)
+
+                # Name
+                table.setItem(row, 1, QTableWidgetItem(elem.name))
+
+                # Type
+                table.setItem(row, 2, QTableWidgetItem(elem.element_type))
+
+                # Category
+                table.setItem(row, 3, QTableWidgetItem(elem.category))
+
+                # X
+                table.setItem(row, 4, QTableWidgetItem(str(elem.x)))
+
+                # Y
+                table.setItem(row, 5, QTableWidgetItem(str(elem.y)))
+
+                # Width
+                table.setItem(row, 6, QTableWidgetItem(str(elem.width)))
+
+                # Height
+                table.setItem(row, 7, QTableWidgetItem(str(elem.height)))
+
+                # Color HEX
+                color_item = QTableWidgetItem(elem.color_hex)
+                # Set background color to show the actual color
+                try:
+                    qcolor = QColor(elem.color_hex)
+                    color_item.setBackground(QBrush(qcolor))
+                    # Set white or black text based on brightness
+                    brightness = (elem.color_rgb[0] * 299 +
+                                  elem.color_rgb[1] * 587 +
+                                  elem.color_rgb[2] * 114) / 1000
+                    if brightness > 128:
+                        color_item.setForeground(QBrush(QColor("black")))
+                    else:
+                        color_item.setForeground(QBrush(QColor("white")))
+                except:
+                    pass
+                table.setItem(row, 8, color_item)
+
+                # Confidence
+                table.setItem(row, 9, QTableWidgetItem(f"{elem.confidence:.2f}"))
+
+                # Source
+                table.setItem(row, 10, QTableWidgetItem(elem.source))
+
+            # Resize columns to fit content
+            table.resizeColumnsToContents()
+
+        def _on_element_selected(self) -> None:
+            """Handle element selection in the table."""
+            table = self.tab_elements
+            selected_items = table.selectedItems()
+
+            if not selected_items:
+                self.element_editor.clear()
+                return
+
+            # Get the first selected row
+            row = selected_items[0].row()
+
+            # Get the element from the first column (ID)
+            id_item = table.item(row, 0)
+            if id_item is None:
+                self.element_editor.clear()
+                return
+
+            element = id_item.data(Qt.UserRole)
+            if isinstance(element, UIElement):
+                self.element_editor.set_element(element)
+            else:
+                self.element_editor.clear()
 
 
 class UI2CodeSuperEngine:
